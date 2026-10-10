@@ -6,7 +6,7 @@ from rich.console import Console
 
 from . import __version__
 from .core import generate as generate_app
-from .core import import_har, load_workspace
+from .core import import_har, load_workspace, validate_workspace
 
 app = typer.Typer(
     help="Capture behavior. Reconstruct APIs. Develop offline.",
@@ -41,6 +41,11 @@ def inspect(workspace: Path):
 @app.command()
 def validate(workspace: Path):
     ws = load_workspace(workspace)
+    errors = validate_workspace(ws)
+    if errors:
+        for error in errors:
+            console.print(f"[red]Validation error:[/red] {error}")
+        raise typer.Exit(code=1)
     console.print(f"Valid workspace: {len(ws.observations)} observations")
 
 
