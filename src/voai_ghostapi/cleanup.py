@@ -57,7 +57,7 @@ def _unexpected(path: Path, kind: str) -> bool:
 
 def find_candidates(root: Path) -> tuple[list[CleanupCandidate], list[CleanupCandidate]]:
     root = root.absolute()
-    if root.is_symlink() or not root.is_dir():
+    if root.is_symlink() or not root.is_dir() or any(parent.is_symlink() for parent in root.parents):
         raise ValueError("cleanup root must be a real directory")
     candidates: list[CleanupCandidate] = []
     skipped: list[CleanupCandidate] = []
@@ -82,11 +82,17 @@ def find_candidates(root: Path) -> tuple[list[CleanupCandidate], list[CleanupCan
 def clean_artifacts(root: Path, *, dry_run: bool = False) -> tuple[list[CleanupCandidate], list[CleanupCandidate], list[str]]:
     candidates, skipped = find_candidates(root)
     errors: list[str] = []
+    removed: list[CleanupCandidate] = []
     if not dry_run:
         for candidate in candidates:
             try:
+                fresh, _ = find_candidates(root)
+                current = next((item for item in fresh if item.path == candidate.path), None)
+                if current is None:
+                    errors.append(f"{candidate.path}: changed since preview")
+                    continue
                 shutil.rmtree(candidate.path)
+                removed.append(candidate)
             except (OSError, PermissionError) as exc:
                 errors.append(f"{candidate.path}: {exc}")
-    return candidates, skipped, errors
-
+    return (candidates if dry_run else removed), skipped, errors
