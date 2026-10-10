@@ -1,0 +1,26 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "voai-ghostapi"
+version = "0.1.0"
+description = "Offline-first HAR to FastAPI mock generator"
+readme = "README.md"
+requires-python = ">=3.11"
+license = {file = "LICENSE"}
+dependencies = ["typer>=0.12", "rich>=13", "fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2"]
+
+[project.optional-dependencies]
+dev = ["pytest", "httpx", "ruff", "mypy", "coverage"]
+
+[project.scripts]
+voai-ghostapi = "voai_ghostapi.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/voai_ghostapi"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+
