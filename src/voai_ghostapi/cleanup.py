@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
 WORKSPACE_NAMES = frozenset({"workspace", "workspace-new", "workspace-fixed"})
 GENERATED_NAMES = frozenset({"generated", "generated-new", "generated-fixed"})
+_REPARSE_POINT = 0x400
 
 
 @dataclass(frozen=True)
@@ -21,6 +23,15 @@ def _within(path: Path, root: Path) -> bool:
         return True
     except ValueError:
         return False
+
+
+def _is_reparse_point(path: Path) -> bool:
+    """Detect Windows junctions and other reparse points on Python 3.11+."""
+    try:
+        attributes = getattr(os.lstat(path), "st_file_attributes", 0)
+    except OSError:
+        return False
+    return bool(attributes & _REPARSE_POINT)
 
 
 def _is_workspace(path: Path) -> bool:
@@ -57,12 +68,14 @@ def _unexpected(path: Path, kind: str) -> bool:
 
 def find_candidates(root: Path) -> tuple[list[CleanupCandidate], list[CleanupCandidate]]:
     root = root.absolute()
-    if root.is_symlink() or not root.is_dir() or any(parent.is_symlink() for parent in root.parents):
+    if root.is_symlink() or _is_reparse_point(root) or not root.is_dir() or any(
+        parent.is_symlink() or _is_reparse_point(parent) for parent in root.parents
+    ):
         raise ValueError("cleanup root must be a real directory")
     candidates: list[CleanupCandidate] = []
     skipped: list[CleanupCandidate] = []
     for path in sorted(root.iterdir(), key=lambda p: p.name.lower()):
-        if path.is_symlink() or not _within(path.absolute(), root):
+        if path.is_symlink() or _is_reparse_point(path) or not _within(path.absolute(), root):
             if path.name in WORKSPACE_NAMES or path.name in GENERATED_NAMES:
                 skipped.append(CleanupCandidate(path, "unknown", "symlink or unsafe path"))
             continue
