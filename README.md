@@ -59,6 +59,20 @@ voai-ghostapi generate ./workspace --output ./generated
 voai-ghostapi serve ./generated --port 8000
 ```
 
+To preview and remove recognized generated artifacts beneath the current directory:
+
+```text
+voai-ghostapi clean --all --dry-run
+voai-ghostapi clean --all
+voai-ghostapi clean --all --yes
+```
+
+Cleanup only considers recognized `workspace`, `workspace-new`, `workspace-fixed`,
+`generated`, `generated-new`, and `generated-fixed` directories. It requires VOAI
+markers and skips directories containing unexpected files. HAR captures, virtual
+environments, source files, and unrelated files are protected. Stop any running
+mock server before cleaning its generated directory.
+
 The import command expects a HAR file in the current project folder. For example, save an authorized browser capture as `capture.har`, then run the commands above. Open `http://127.0.0.1:8000/docs` to explore the generated mock.
 
 ## CLI Commands
@@ -100,4 +114,3 @@ See `CONTRIBUTING.md` for local checks and the contribution process.
 ## License
 
 MIT.
-

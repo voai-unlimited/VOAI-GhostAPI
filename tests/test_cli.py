@@ -1,6 +1,9 @@
 import json
+import os
+import subprocess
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from voai_ghostapi.cli import app
@@ -85,4 +88,100 @@ def test_cli_failures_have_nonzero_exit(tmp_path):
 def test_cli_serve_rejects_nonlocal_host(tmp_path):
     result = runner.invoke(app, ["serve", str(tmp_path), "--host", "0.0.0.0"])
     assert result.exit_code != 0
+
+
+def _make_generated(path: Path) -> None:
+    path.mkdir()
+    (path / "app.py").write_text("from fastapi import FastAPI\napp = FastAPI(title='VOAI-GhostAPI mock')\n")
+    (path / "README.md").write_text("# Generated mock\n")
+
+
+def test_clean_dry_run_and_yes_protects_unrelated_files(tmp_path):
+    workspace = tmp_path / "workspace-new"
+    workspace.mkdir()
+    (workspace / "workspace.json").write_text('{"version":"1","observations":[]}')
+    generated = tmp_path / "generated-new"
+    _make_generated(generated)
+    (tmp_path / "capture.har").write_text("HAR")
+    (tmp_path / "source.py").write_text("print('keep')")
+    result = runner.invoke(app, ["clean", "--all", "--dry-run", "--root", str(tmp_path)])
+    assert result.exit_code == 0
+    assert workspace.exists() and generated.exists()
+    result = runner.invoke(app, ["clean", "--all", "--yes", "--root", str(tmp_path)])
+    assert result.exit_code == 0
+    assert not workspace.exists() and not generated.exists()
+    assert (tmp_path / "capture.har").exists() and (tmp_path / "source.py").exists()
+
+
+def test_clean_confirmation_and_unknown_files_are_safe(tmp_path):
+    workspace = tmp_path / "workspace-fixed"
+    workspace.mkdir()
+    (workspace / "workspace.json").write_text('{"version":"1","observations":[]}')
+    (workspace / "notes.txt").write_text("keep")
+    result = runner.invoke(app, ["clean", "--all", "--root", str(tmp_path)], input="n\n")
+    assert result.exit_code == 0
+    assert workspace.exists()
+    assert "unexpected" in " ".join(result.stdout.split())
+
+
+def test_clean_confirmation_refusal_and_approval(tmp_path):
+    workspace = tmp_path / "workspace-new"
+    workspace.mkdir()
+    (workspace / "workspace.json").write_text('{"version":"1","observations":[]}')
+    refused = runner.invoke(app, ["clean", "--all", "--root", str(tmp_path)], input="n\n")
+    assert refused.exit_code == 0 and workspace.exists()
+    approved = runner.invoke(app, ["clean", "--all", "--root", str(tmp_path)], input="y\n")
+    assert approved.exit_code == 0 and not workspace.exists()
+
+
+def test_clean_rejects_symlink_and_missing_root(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "workspace.json").write_text('{"version":"1","observations":[]}')
+    link = tmp_path / "workspace"
+    try:
+        link.symlink_to(target, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        return
+    result = runner.invoke(app, ["clean", "--all", "--yes", "--root", str(tmp_path)])
+    assert result.exit_code == 0
+    assert target.exists()
+    result = runner.invoke(app, ["clean", "--all", "--root", str(tmp_path / "nope")])
+    assert result.exit_code == 1
+
+
+def test_clean_rejects_symlinked_parent(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    marker = real / "workspace-new"
+    marker.mkdir()
+    (marker / "workspace.json").write_text('{"version":"1","observations":[]}')
+    parent = tmp_path / "parent-link"
+    try:
+        parent.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        return
+    result = runner.invoke(app, ["clean", "--all", "--yes", "--root", str(parent)])
+    assert result.exit_code == 1 and marker.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows-specific")
+def test_clean_rejects_windows_junction(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    marker = target / "workspace-new"
+    marker.mkdir()
+    (marker / "workspace.json").write_text('{"version":"1","observations":[]}')
+    junction = tmp_path / "junction"
+    made = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if made.returncode != 0:
+        pytest.skip("junction creation unavailable")
+    result = runner.invoke(app, ["clean", "--all", "--yes", "--root", str(junction)])
+    assert result.exit_code == 1
+    assert marker.exists()
 
