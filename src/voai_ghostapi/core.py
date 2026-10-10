@@ -1,8 +1,13 @@
 from __future__ import annotations
-import json, re
+
+import json
+import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
+
 from pydantic import BaseModel, Field
+
 
 class Observation(BaseModel):
     method: str
@@ -15,79 +20,257 @@ class Observation(BaseModel):
     response_headers: dict[str, str] = Field(default_factory=dict)
     response_body: Any = None
 
+
 class Workspace(BaseModel):
     version: str = "1"
     observations: list[Observation] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     sanitized_values: int = 0
+    schemas: dict[str, Any] = Field(default_factory=dict)
 
-SECRET_KEY = re.compile(r"(authorization|cookie|set-cookie|password|passwd|token|secret|api[_-]?key|session)", re.I)
-UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$", re.I)
+
+SECRET_KEY = re.compile(
+    r"(authorization|cookie|set-cookie|password|passwd|token|secret|api[_-]?key|session)",
+    re.IGNORECASE,
+)
+UUID = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
+
 
 def sanitize(value: Any, counter: list[int]) -> Any:
     if isinstance(value, dict):
         out = {}
         for k, v in value.items():
             if SECRET_KEY.search(str(k)):
-                counter[0] += 1; out[k] = "<REDACTED>"
-            else: out[k] = sanitize(v, counter)
+                counter[0] += 1
+                out[k] = "<REDACTED>"
+            else:
+                out[k] = sanitize(v, counter)
         return out
-    if isinstance(value, list): return [sanitize(v, counter) for v in value]
+    if isinstance(value, list):
+        return [sanitize(v, counter) for v in value]
     if isinstance(value, str):
-        patterns = [r"Bearer\s+[^\s]+", r"(?i)(api[_-]?key|token|password)=([^&\s]+)", r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}"]
+        patterns = [
+            r"Bearer\s+[^\s]+",
+            r"(?i)(api[_-]?key|token|password)=([^&\s]+)",
+            r"[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}",
+        ]
         result = value
         for p in patterns:
             new = re.sub(p, lambda m: "<REDACTED>", result)
-            if new != result: counter[0] += 1
+            if new != result:
+                counter[0] += 1
             result = new
         return result
     return value
 
+
 def _body(text: Any, headers: dict[str, str], limit: int, counter: list[int]) -> Any:
-    if not isinstance(text, str) or len(text.encode("utf-8", "ignore")) > limit: return None
+    if not isinstance(text, str) or len(text.encode("utf-8", "ignore")) > limit:
+        return None
     clean = sanitize(text, counter)
-    ct = next((v for k,v in headers.items() if k.lower()=="content-type"), "")
+    ct = next((v for k, v in headers.items() if k.lower() == "content-type"), "")
     if "json" in ct:
-        try: return sanitize(json.loads(clean), counter)
-        except (ValueError, TypeError): return clean
+        try:
+            return sanitize(json.loads(clean), counter)
+        except (ValueError, TypeError):
+            return clean
     return clean
 
-def import_har(source: Path, output: Path, max_bytes=25*1024*1024, max_entries=5000, body_limit=1024*1024) -> Workspace:
-    if source.stat().st_size > max_bytes: raise ValueError("HAR exceeds 25 MiB limit")
-    try: data = json.loads(source.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as e: raise ValueError("invalid HAR JSON") from e
+
+def infer_schema(value: Any) -> Any:
+    """Return a deterministic, conservative JSON shape description."""
+    if value is None:
+        return {"type": ["null"]}
+    if isinstance(value, bool):
+        return {"type": ["boolean"]}
+    if isinstance(value, int) and not isinstance(value, bool):
+        return {"type": ["integer"]}
+    if isinstance(value, float):
+        return {"type": ["number"]}
+    if isinstance(value, str):
+        return {"type": ["string"]}
+    if isinstance(value, list):
+        shapes = [infer_schema(item) for item in value]
+        return {"type": ["array"], "items": merge_schemas(shapes)}
+    if isinstance(value, dict):
+        return {
+            "type": ["object"],
+            "properties": {str(k): infer_schema(v) for k, v in sorted(value.items())},
+        }
+    return {"type": ["unknown"]}
+
+
+def merge_schemas(shapes: list[Any]) -> Any:
+    if not shapes:
+        return {"type": ["unknown"]}
+    types = sorted({t for shape in shapes for t in shape.get("type", ["unknown"])})
+    result: dict[str, Any] = {"type": types}
+    if all(shape.get("type") == ["object"] for shape in shapes):
+        keys = sorted({k for shape in shapes for k in shape.get("properties", {})})
+        result["properties"] = {
+            k: merge_schemas(
+                [s["properties"][k] for s in shapes if k in s.get("properties", {})]
+            )
+            for k in keys
+        }
+    return result
+
+
+def _safe_output(output: Path) -> None:
+    output = output.resolve()
+    if output.exists() and output.is_symlink():
+        raise ValueError("output path may not be a symlink")
+    if output.exists() and any(output.iterdir()):
+        raise ValueError("output directory must be empty")
+    output.mkdir(parents=True, exist_ok=True)
+
+
+def import_har(
+    source: Path,
+    output: Path,
+    max_bytes=25 * 1024 * 1024,
+    max_entries=5000,
+    body_limit=1024 * 1024,
+) -> Workspace:
+    if source.stat().st_size > max_bytes:
+        raise ValueError("HAR exceeds 25 MiB limit")
+    try:
+        data = json.loads(source.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as e:
+        raise ValueError("invalid HAR JSON") from e
     entries = data.get("log", {}).get("entries", [])
-    if not isinstance(entries, list): raise ValueError("HAR entries must be a list")
-    if len(entries) > max_entries: raise ValueError("HAR exceeds 5,000 entry limit")
-    count=[0]; observations=[]; warnings=[]
+    if not isinstance(entries, list):
+        raise TypeError("HAR entries must be a list")
+    if len(entries) > max_entries:
+        raise ValueError("HAR exceeds 5,000 entry limit")
+    count = [0]
+    observations = []
+    warnings = []
     for entry in entries:
         try:
-            req, resp = entry["request"], entry["response"]; url=str(req["url"]); method=str(req.get("method","GET")).upper()
-            from urllib.parse import urlsplit, parse_qsl
-            parts=urlsplit(url); path=parts.path or "/"
-            rh={str(x.get("name")): str(x.get("value")) for x in req.get("headers",[]) if isinstance(x,dict) and x.get("name")}
-            sh={str(x.get("name")): str(x.get("value")) for x in resp.get("headers",[]) if isinstance(x,dict) and x.get("name")}
-            rb=_body(req.get("postData",{}).get("text") if isinstance(req.get("postData"),dict) else None, rh, body_limit, count)
-            sb=_body(resp.get("content",{}).get("text") if isinstance(resp.get("content"),dict) else None, sh, body_limit, count)
-            observations.append(Observation(method=method,url="<ORIGIN>"+path,path=path,query=dict(parse_qsl(parts.query)),request_headers=sanitize(rh,count),request_body=rb,status=int(resp.get("status",200)),response_headers=sanitize(sh,count),response_body=sb))
-        except (KeyError, TypeError, ValueError): warnings.append("Skipped malformed HAR entry")
-    ws=Workspace(observations=observations,warnings=warnings,sanitized_values=count[0]); output.mkdir(parents=True,exist_ok=True); (output/"workspace.json").write_text(ws.model_dump_json(indent=2),encoding="utf-8"); return ws
+            req, resp = entry["request"], entry["response"]
+            url = str(req["url"])
+            method = str(req.get("method", "GET")).upper()
+            parts = urlsplit(url)
+            path = parts.path or "/"
+            rh = {
+                str(x.get("name")): str(x.get("value"))
+                for x in req.get("headers", [])
+                if isinstance(x, dict) and x.get("name")
+            }
+            sh = {
+                str(x.get("name")): str(x.get("value"))
+                for x in resp.get("headers", [])
+                if isinstance(x, dict) and x.get("name")
+            }
+            rb = _body(
+                req.get("postData", {}).get("text")
+                if isinstance(req.get("postData"), dict)
+                else None,
+                rh,
+                body_limit,
+                count,
+            )
+            sb = _body(
+                resp.get("content", {}).get("text")
+                if isinstance(resp.get("content"), dict)
+                else None,
+                sh,
+                body_limit,
+                count,
+            )
+            query = {
+                str(k): str(sanitize(v, count))
+                for k, v in parse_qsl(parts.query, keep_blank_values=True)
+            }
+            if any(ord(ch) < 32 for ch in path):
+                raise ValueError("unsafe path")
+            observations.append(
+                Observation(
+                    method=method,
+                    url="<ORIGIN>" + sanitize(path, count),
+                    path=sanitize(path, count),
+                    query=sanitize(query, count),
+                    request_headers=sanitize(rh, count),
+                    request_body=rb,
+                    status=int(resp.get("status", 200)),
+                    response_headers=sanitize(sh, count),
+                    response_body=sb,
+                )
+            )
+        except (KeyError, TypeError, ValueError):
+            warnings.append("Skipped malformed HAR entry")
+    schemas = {
+        f"{o.method} {o.path}": infer_schema(o.response_body)
+        for o in observations
+        if o.response_body is not None
+    }
+    ws = Workspace(
+        observations=observations,
+        warnings=warnings,
+        sanitized_values=count[0],
+        schemas=schemas,
+    )
+    _safe_output(output)
+    (output / "workspace.json").write_text(
+        ws.model_dump_json(indent=2), encoding="utf-8"
+    )
+    return ws
+
 
 def load_workspace(path: Path) -> Workspace:
-    try: return Workspace.model_validate_json((path/"workspace.json").read_text(encoding="utf-8"))
-    except Exception as e: raise ValueError("invalid workspace") from e
+    try:
+        return Workspace.model_validate_json(
+            (path / "workspace.json").read_text(encoding="utf-8")
+        )
+    except Exception as e:
+        raise ValueError("invalid workspace") from e
+
 
 def route_path(path: str) -> str:
-    return "/".join(f"{{param}}" if (p.isdigit() or UUID.match(p)) else p for p in path.split("/")) or "/"
+    if any(ord(ch) < 32 or ch in "\r\n" for ch in path):
+        raise ValueError("unsafe route path")
+    return (
+        "/".join(
+            "{param}" if (p.isdigit() or UUID.match(p)) else p for p in path.split("/")
+        )
+        or "/"
+    )
+
 
 def generate(workspace: Workspace, output: Path) -> None:
-    output.mkdir(parents=True,exist_ok=True); routes=[]; seen=set()
+    _safe_output(output)
+    routes = []
+    seen = set()
     for o in workspace.observations:
-        route=route_path(o.path); key=(o.method,route)
-        if key in seen: continue
-        seen.add(key); body=json.dumps(o.response_body, ensure_ascii=False) if o.response_body is not None else "null"; routes.append((o.method,route,o.status,body))
-    lines=["from fastapi import FastAPI, Response", "app=FastAPI(title='VOAI-GhostAPI mock')"]
-    for i,(method,route,status,body) in enumerate(routes):
-        fn=f"route_{i}"; lines += [f"@app.{method.lower()}('{route}')", f"def {fn}():", f"    return Response(content={body!r}, status_code={status}, media_type='application/json')"]
-    (output/"app.py").write_text("\n".join(lines)+"\n",encoding="utf-8"); (output/"README.md").write_text("# Generated mock\n\nRun `uvicorn app:app --host 127.0.0.1 --port 8000`.\n",encoding="utf-8")
+        route = route_path(o.path)
+        key = (o.method, route)
+        if key in seen:
+            continue
+        seen.add(key)
+        body = (
+            json.dumps(o.response_body, ensure_ascii=False)
+            if o.response_body is not None
+            else "null"
+        )
+        routes.append((o.method, route, o.status, body))
+    lines = [
+        "from fastapi import FastAPI, Response",
+        "app=FastAPI(title='VOAI-GhostAPI mock')",
+    ]
+    for i, (method, route, status, body) in enumerate(routes):
+        fn = f"route_{i}"
+        lines += [
+            f"@app.{method.lower()}('{route}')",
+            f"def {fn}():",
+            f"    return Response(content={body!r}, status_code={status}, media_type='application/json')",
+        ]
+    (output / "app.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (output / "README.md").write_text(
+        "# Generated mock\n\nRun `uvicorn app:app --host 127.0.0.1 --port 8000`.\n",
+        encoding="utf-8",
+    )
 
