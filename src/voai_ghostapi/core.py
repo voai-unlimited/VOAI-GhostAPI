@@ -276,12 +276,17 @@ def load_workspace(path: Path) -> Workspace:
 def route_path(path: str) -> str:
     if any(ord(ch) < 32 or ch in "\r\n" for ch in path):
         raise ValueError("unsafe route path")
-    return (
-        "/".join(
-            "{param}" if (p.isdigit() or UUID.match(p)) else p for p in path.split("/")
-        )
-        or "/"
-    )
+    dynamic_index = 0
+    result = []
+    for part in path.split("/"):
+        if part.isdigit() or UUID.match(part):
+            dynamic_index += 1
+            result.append(
+                "{param}" if dynamic_index == 1 else f"{{param{dynamic_index}}}"
+            )
+        else:
+            result.append(part)
+    return "/".join(result) or "/"
 
 
 def validate_workspace(workspace: Workspace) -> list[str]:
@@ -331,14 +336,20 @@ def generate(workspace: Workspace, output: Path) -> None:
     ]
     serialized = json.dumps(route_data, ensure_ascii=False, sort_keys=True)
     lines = [
+        "import inspect",
         "import json",
         "from fastapi import FastAPI, Response",
         "app = FastAPI(title='VOAI-GhostAPI mock')",
         f"ROUTES = json.loads({serialized!r})",
-        "def _handler(body, status):",
-        "    return Response(content=json.dumps(body, ensure_ascii=False), status_code=status, media_type='application/json')",
+        "def _make_handler(body, status, path_names):",
+        "    signature = [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=str) for name in path_names]",
+        "    def handler():",
+        "        return Response(content=json.dumps(body, ensure_ascii=False), status_code=status, media_type='application/json')",
+        "    handler.__signature__ = inspect.Signature(signature)",
+        "    return handler",
         "for _route in ROUTES:",
-        "    app.add_api_route(_route['path'], lambda _r=_route: _handler(_r['body'], _r['status']), methods=[_route['method']])",
+        "    _names = [part[1:-1] for part in _route['path'].split('/') if part.startswith('{') and part.endswith('}') ]",
+        "    app.add_api_route(_route['path'], _make_handler(_route['body'], _route['status'], _names), methods=[_route['method']])",
     ]
     (output / "app.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (output / "README.md").write_text(
