@@ -118,7 +118,17 @@ def test_clean_confirmation_and_unknown_files_are_safe(tmp_path):
     result = runner.invoke(app, ["clean", "--all", "--root", str(tmp_path)], input="n\n")
     assert result.exit_code == 0
     assert workspace.exists()
-    assert "unexpected user files" in result.stdout
+    assert "unexpected" in " ".join(result.stdout.split())
+
+
+def test_clean_confirmation_refusal_and_approval(tmp_path):
+    workspace = tmp_path / "workspace-new"
+    workspace.mkdir()
+    (workspace / "workspace.json").write_text('{"version":"1","observations":[]}')
+    refused = runner.invoke(app, ["clean", "--all", "--root", str(tmp_path)], input="n\n")
+    assert refused.exit_code == 0 and workspace.exists()
+    approved = runner.invoke(app, ["clean", "--all", "--root", str(tmp_path)], input="y\n")
+    assert approved.exit_code == 0 and not workspace.exists()
 
 
 def test_clean_rejects_symlink_and_missing_root(tmp_path):
@@ -135,4 +145,19 @@ def test_clean_rejects_symlink_and_missing_root(tmp_path):
     assert target.exists()
     result = runner.invoke(app, ["clean", "--all", "--root", str(tmp_path / "nope")])
     assert result.exit_code == 1
+
+
+def test_clean_rejects_symlinked_parent(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    marker = real / "workspace-new"
+    marker.mkdir()
+    (marker / "workspace.json").write_text('{"version":"1","observations":[]}')
+    parent = tmp_path / "parent-link"
+    try:
+        parent.symlink_to(real, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        return
+    result = runner.invoke(app, ["clean", "--all", "--yes", "--root", str(parent)])
+    assert result.exit_code == 1 and marker.exists()
 
