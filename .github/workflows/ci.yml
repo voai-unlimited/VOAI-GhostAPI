@@ -17,7 +17,23 @@ jobs:
       - run: mypy src
       - run: pytest --cov=voai_ghostapi --cov-report=term-missing
       - run: python -m build
-      - run: python -m pip install --find-links dist voai-ghostapi==0.1.0
-      - run: voai-ghostapi --help
-      - run: voai-ghostapi --version
+      - run: python -m venv .wheel-smoke
+      - name: Install wheel in clean environment (Windows)
+        if: runner.os == 'Windows'
+        run: .wheel-smoke\Scripts\python -m pip install (Get-ChildItem dist\*.whl)
+        shell: pwsh
+      - name: Install wheel in clean environment (Unix)
+        if: runner.os != 'Windows'
+        run: .wheel-smoke/bin/python -m pip install dist/*.whl
+      - name: Smoke test clean wheel (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          .wheel-smoke\Scripts\voai-ghostapi.exe --help
+          .wheel-smoke\Scripts\voai-ghostapi.exe --version
+        shell: pwsh
+      - name: Smoke test clean wheel (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          .wheel-smoke/bin/voai-ghostapi --help
+          .wheel-smoke/bin/voai-ghostapi --version
 
