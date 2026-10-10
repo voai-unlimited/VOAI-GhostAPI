@@ -343,7 +343,7 @@ def generate(workspace: Workspace, output: Path) -> None:
         f"ROUTES = json.loads({serialized!r})",
         "def _make_handler(body, status, path_names):",
         "    signature = [inspect.Parameter(name, inspect.Parameter.POSITIONAL_OR_KEYWORD, annotation=str) for name in path_names]",
-        "    def handler():",
+        "    def handler(**path_params):",
         "        return Response(content=json.dumps(body, ensure_ascii=False), status_code=status, media_type='application/json')",
         "    handler.__signature__ = inspect.Signature(signature)",
         "    return handler",
