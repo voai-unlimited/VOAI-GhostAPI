@@ -83,6 +83,25 @@ def _body(text: Any, headers: dict[str, str], limit: int, counter: list[int]) ->
     return clean
 
 
+def sanitize_path(path: str, counter: list[int]) -> str:
+    """Redact values that follow sensitive URL path labels."""
+    parts = path.split("/")
+    previous_sensitive = False
+    for index, segment in enumerate(parts):
+        if previous_sensitive and segment:
+            parts[index] = "<REDACTED>"
+            counter[0] += 1
+        previous_sensitive = bool(SECRET_KEY.search(segment))
+        if (
+            not previous_sensitive
+            and len(segment) >= 24
+            and re.fullmatch(r"[A-Za-z0-9._~-]+", segment)
+        ):
+            parts[index] = "<REDACTED>"
+            counter[0] += 1
+    return "/".join(parts)
+
+
 def infer_schema(value: Any) -> Any:
     """Return a deterministic, conservative JSON shape description."""
     if value is None:
@@ -111,14 +130,26 @@ def merge_schemas(shapes: list[Any]) -> Any:
         return {"type": ["unknown"]}
     types = sorted({t for shape in shapes for t in shape.get("type", ["unknown"])})
     result: dict[str, Any] = {"type": types}
-    if all(shape.get("type") == ["object"] for shape in shapes):
-        keys = sorted({k for shape in shapes for k in shape.get("properties", {})})
+    object_shapes = [shape for shape in shapes if "object" in shape.get("type", [])]
+    if object_shapes:
+        keys = sorted(
+            {k for shape in object_shapes for k in shape.get("properties", {})}
+        )
         result["properties"] = {
             k: merge_schemas(
-                [s["properties"][k] for s in shapes if k in s.get("properties", {})]
+                [
+                    s["properties"][k]
+                    for s in object_shapes
+                    if k in s.get("properties", {})
+                ]
             )
             for k in keys
         }
+        result["required"] = sorted(
+            set.intersection(
+                *[set(shape.get("properties", {})) for shape in object_shapes]
+            )
+        )
     return result
 
 
@@ -197,11 +228,12 @@ def import_har(
             }
             if any(ord(ch) < 32 for ch in path):
                 raise ValueError("unsafe path")
+            clean_path = sanitize_path(path, count)
             observations.append(
                 Observation(
                     method=method,
-                    url="<ORIGIN>" + sanitize(path, count),
-                    path=sanitize(path, count),
+                    url="<ORIGIN>" + clean_path,
+                    path=clean_path,
                     query=sanitize(query, count),
                     request_headers=sanitize(rh, count),
                     request_body=rb,
