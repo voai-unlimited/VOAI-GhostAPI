@@ -95,9 +95,9 @@ def clean(
     if not yes and not typer.confirm("Delete these directories?", default=False):
         console.print("Cleanup cancelled.")
         return
-    _, _, errors = clean_artifacts(root)
+    removed, _, errors = clean_artifacts(root)
     for error in errors:
         console.print(f"[red]Cleanup error:[/red] {error}")
     if errors:
         raise typer.Exit(code=1)
-    console.print(f"Removed {len(candidates)} artifact director{'y' if len(candidates) == 1 else 'ies'}.")
+    console.print(f"Removed {len(removed)} artifact director{'y' if len(removed) == 1 else 'ies'}.")
