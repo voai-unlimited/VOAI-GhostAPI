@@ -191,3 +191,10 @@ def test_generated_fastapi_route(tmp_path):
     assert module.app.docs_url == "/docs"
     assert "/items/{param}" in module.app.openapi()["paths"]
 
+    endpoint = next(
+        route.endpoint for route in module.app.routes if route.path == "/items/{param}"
+    )
+    response = endpoint()
+    assert response.status_code == 200
+    assert response.body == b'{"ok": true}'
+
