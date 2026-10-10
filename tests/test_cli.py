@@ -1,6 +1,9 @@
 import json
+import os
+import subprocess
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from voai_ghostapi.cli import app
@@ -160,4 +163,25 @@ def test_clean_rejects_symlinked_parent(tmp_path):
         return
     result = runner.invoke(app, ["clean", "--all", "--yes", "--root", str(parent)])
     assert result.exit_code == 1 and marker.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="junctions are Windows-specific")
+def test_clean_rejects_windows_junction(tmp_path):
+    target = tmp_path / "target"
+    target.mkdir()
+    marker = target / "workspace-new"
+    marker.mkdir()
+    (marker / "workspace.json").write_text('{"version":"1","observations":[]}')
+    junction = tmp_path / "junction"
+    made = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(target)],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if made.returncode != 0:
+        pytest.skip("junction creation unavailable")
+    result = runner.invoke(app, ["clean", "--all", "--yes", "--root", str(junction)])
+    assert result.exit_code == 1
+    assert marker.exists()
 
