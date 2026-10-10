@@ -37,6 +37,9 @@ UUID = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
     re.IGNORECASE,
 )
+ALLOWED_METHODS = frozenset(
+    {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"}
+)
 
 
 def sanitize(value: Any, counter: list[int]) -> Any:
@@ -120,9 +123,13 @@ def merge_schemas(shapes: list[Any]) -> Any:
 
 
 def _safe_output(output: Path) -> None:
-    output = output.resolve()
-    if output.exists() and output.is_symlink():
+    if output.is_symlink():
         raise ValueError("output path may not be a symlink")
+    for parent in output.parents:
+        if parent == parent.parent:
+            break
+        if parent.is_symlink():
+            raise ValueError("output path may not traverse a symlink")
     if output.exists() and any(output.iterdir()):
         raise ValueError("output directory must be empty")
     output.mkdir(parents=True, exist_ok=True)
@@ -154,6 +161,8 @@ def import_har(
             req, resp = entry["request"], entry["response"]
             url = str(req["url"])
             method = str(req.get("method", "GET")).upper()
+            if method not in ALLOWED_METHODS:
+                raise ValueError("unsupported HTTP method")
             parts = urlsplit(url)
             path = parts.path or "/"
             rh = {
@@ -203,11 +212,13 @@ def import_har(
             )
         except (KeyError, TypeError, ValueError):
             warnings.append("Skipped malformed HAR entry")
-    schemas = {
-        f"{o.method} {o.path}": infer_schema(o.response_body)
-        for o in observations
-        if o.response_body is not None
-    }
+    grouped: dict[str, list[Any]] = {}
+    for observation in observations:
+        if observation.response_body is not None:
+            grouped.setdefault(
+                f"{observation.method} {route_path(observation.path)}", []
+            ).append(infer_schema(observation.response_body))
+    schemas = {key: merge_schemas(shapes) for key, shapes in sorted(grouped.items())}
     ws = Workspace(
         observations=observations,
         warnings=warnings,
@@ -241,11 +252,36 @@ def route_path(path: str) -> str:
     )
 
 
+def validate_workspace(workspace: Workspace) -> list[str]:
+    errors: list[str] = []
+    if workspace.version != "1":
+        errors.append("unsupported workspace version")
+    for observation in workspace.observations:
+        if observation.method not in ALLOWED_METHODS:
+            errors.append("unsupported HTTP method")
+        try:
+            route_path(observation.path)
+        except ValueError:
+            errors.append("invalid route path")
+        if SECRET_KEY.search(observation.url) and "<REDACTED>" not in observation.url:
+            errors.append("sensitive URL data detected")
+    for key, schema in workspace.schemas.items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(schema, dict)
+            or "type" not in schema
+        ):
+            errors.append("invalid schema")
+    return sorted(set(errors))
+
+
 def generate(workspace: Workspace, output: Path) -> None:
     _safe_output(output)
     routes = []
     seen = set()
     for o in workspace.observations:
+        if o.method not in ALLOWED_METHODS:
+            raise ValueError("unsupported HTTP method")
         route = route_path(o.path)
         key = (o.method, route)
         if key in seen:
@@ -257,17 +293,21 @@ def generate(workspace: Workspace, output: Path) -> None:
             else "null"
         )
         routes.append((o.method, route, o.status, body))
-    lines = [
-        "from fastapi import FastAPI, Response",
-        "app=FastAPI(title='VOAI-GhostAPI mock')",
+    route_data = [
+        {"method": method, "path": route, "status": status, "body": json.loads(body)}
+        for method, route, status, body in routes
     ]
-    for i, (method, route, status, body) in enumerate(routes):
-        fn = f"route_{i}"
-        lines += [
-            f"@app.{method.lower()}('{route}')",
-            f"def {fn}():",
-            f"    return Response(content={body!r}, status_code={status}, media_type='application/json')",
-        ]
+    serialized = json.dumps(route_data, ensure_ascii=False, sort_keys=True)
+    lines = [
+        "import json",
+        "from fastapi import FastAPI, Response",
+        "app = FastAPI(title='VOAI-GhostAPI mock')",
+        f"ROUTES = json.loads({serialized!r})",
+        "def _handler(body, status):",
+        "    return Response(content=json.dumps(body, ensure_ascii=False), status_code=status, media_type='application/json')",
+        "for _route in ROUTES:",
+        "    app.add_api_route(_route['path'], lambda _r=_route: _handler(_r['body'], _r['status']), methods=[_route['method']])",
+    ]
     (output / "app.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
     (output / "README.md").write_text(
         "# Generated mock\n\nRun `uvicorn app:app --host 127.0.0.1 --port 8000`.\n",
