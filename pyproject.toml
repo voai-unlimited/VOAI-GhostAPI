@@ -12,7 +12,7 @@ license = {file = "LICENSE"}
 dependencies = ["typer>=0.12", "rich>=13", "fastapi>=0.110", "uvicorn>=0.29", "pydantic>=2"]
 
 [project.optional-dependencies]
-dev = ["pytest", "httpx", "ruff", "mypy", "coverage"]
+dev = ["pytest", "httpx", "ruff", "mypy", "coverage", "build"]
 
 [project.scripts]
 voai-ghostapi = "voai_ghostapi.cli:app"
