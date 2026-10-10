@@ -1,8 +1,10 @@
 import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
+from fastapi.testclient import TestClient
 
 from voai_ghostapi.core import (
     Observation,
@@ -111,16 +113,13 @@ def test_generated_source_handles_special_paths(tmp_path, path):
 
 
 def test_invalid_method_is_rejected(tmp_path):
-    with pytest.raises(ValueError, match="unsupported HTTP method"):
-        import_har(har(tmp_path), tmp_path / "workspace", max_entries=5000)
-        bad = Workspace(
-            observations=[
-                Observation(
-                    method="GET;__import__('os')", url="<ORIGIN>", path="/x", status=200
-                )
-            ]
-        )
-        generate(bad, tmp_path / "out")
+    source = har(tmp_path)
+    payload = json.loads(source.read_text())
+    payload["log"]["entries"][0]["request"]["method"] = "GET;__import__('os')"
+    source.write_text(json.dumps(payload))
+    workspace = import_har(source, tmp_path / "workspace")
+    assert workspace.observations == []
+    assert workspace.warnings == ["Skipped malformed HAR entry"]
 
 
 def test_symlink_output_is_rejected(tmp_path):
@@ -155,6 +154,30 @@ def test_schema_aggregation_is_deterministic(tmp_path):
     assert "null" in schema["properties"]["id"]["type"]
 
 
+def test_multiple_dynamic_path_parameters_are_distinct(tmp_path):
+    out = tmp_path / "out"
+    generate(
+        Workspace(
+            observations=[
+                Observation(
+                    method="GET",
+                    url="<ORIGIN>",
+                    path="/users/1/orders/2",
+                    status=200,
+                    response_body={},
+                )
+            ]
+        ),
+        out,
+    )
+    spec = importlib.util.spec_from_file_location("multi_app", out / "app.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    operation = module.app.openapi()["paths"]["/users/{param}/orders/{param2}"]["get"]
+    assert [item["name"] for item in operation["parameters"]] == ["param", "param2"]
+
+
 def test_validate_detects_bad_workspace():
     ws = Workspace(
         version="99",
@@ -170,6 +193,10 @@ def test_validate_detects_bad_workspace():
 
 
 def test_generated_fastapi_route(tmp_path):
+    if sys.version_info >= (3, 15):
+        pytest.skip(
+            "local Starlette TestClient compatibility is unavailable on Python 3.15"
+        )
     out = tmp_path / "out"
     ws = Workspace(
         observations=[
@@ -191,10 +218,20 @@ def test_generated_fastapi_route(tmp_path):
     assert module.app.docs_url == "/docs"
     assert "/items/{param}" in module.app.openapi()["paths"]
 
-    endpoint = next(
-        route.endpoint for route in module.app.routes if route.path == "/items/{param}"
-    )
-    response = endpoint()
+    with TestClient(module.app) as client:
+        response = client.get("/items/42")
+        unknown = client.get("/does-not-exist")
     assert response.status_code == 200
-    assert response.body == b'{"ok": true}'
+    assert response.json() == {"ok": True}
+    assert unknown.status_code == 404
+    operation = module.app.openapi()["paths"]["/items/{param}"]["get"]
+    assert all(
+        parameter["name"] != "_r" for parameter in operation.get("parameters", [])
+    )
+    parameter = operation["parameters"][0]
+    assert (
+        parameter["name"] == "param"
+        and parameter["in"] == "path"
+        and parameter["required"] is True
+    )
 
