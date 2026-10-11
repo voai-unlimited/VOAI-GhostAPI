@@ -36,11 +36,13 @@ async def discover_api_requests(url: str, *, storage_state: Path | None = None, 
             selector = recipe.get("selector")
             if action not in {"click", "fill", "scroll"}:
                 raise ValueError("only click, fill, and scroll interactions are permitted")
-            if action != "scroll" and not isinstance(selector, str):
-                raise ValueError("interactive selectors are required")
             if action == "click":
+                if not isinstance(selector, str):
+                    raise ValueError("interactive selectors are required")
                 await page.locator(selector).first.click(timeout=timeout_ms)
             elif action == "fill":
+                if not isinstance(selector, str):
+                    raise ValueError("interactive selectors are required")
                 await page.locator(selector).first.fill(str(recipe.get("value", "")))
             else:
                 await page.mouse.wheel(0, float(recipe.get("distance", 800)))
