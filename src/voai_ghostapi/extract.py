@@ -269,6 +269,7 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
         (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
     if url:
         report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, resume=resume)
+        raw_api_observations = report.get("api_observations", [])
         website_observations = [
             Observation(
                 method=str(item["method"]),
@@ -279,7 +280,7 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
                 source="website",
                 source_page=str(item.get("source_page")) if item.get("source_page") else None,
             )
-            for item in report.get("api_observations", [])
+            for item in raw_api_observations if isinstance(raw_api_observations, list)
             if isinstance(item, dict)
         ]
         if website_observations:
@@ -291,11 +292,11 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
                 key = (observation.method, observation.path, observation.status, json.dumps(observation.response_body, sort_keys=True, default=str))
                 unique.setdefault(key, observation)
             workspace.observations = sorted(unique.values(), key=lambda item: (item.method, item.path, item.status, item.source))
-            grouped: dict[str, list[object]] = {}
+            grouped_website: dict[str, list[object]] = {}
             for observation in workspace.observations:
                 if observation.response_body is not None:
-                    grouped.setdefault(f"{observation.method} {route_path(observation.path)}", []).append(infer_schema(observation.response_body))
-            workspace.schemas = {key: merge_schemas(value) for key, value in sorted(grouped.items())}
+                    grouped_website.setdefault(f"{observation.method} {route_path(observation.path)}", []).append(infer_schema(observation.response_body))
+            workspace.schemas = {key: merge_schemas(value) for key, value in sorted(grouped_website.items())}
             (output / "workspace").mkdir(exist_ok=True)
             (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
         if snapshot:

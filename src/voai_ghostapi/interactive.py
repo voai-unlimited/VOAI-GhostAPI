@@ -13,7 +13,7 @@ async def discover_api_requests(url: str, *, storage_state: Path | None = None, 
     replay state-changing requests automatically.
     """
     try:
-        from playwright.async_api import async_playwright
+        from playwright.async_api import async_playwright  # type: ignore[import-not-found]
     except ImportError as exc:
         raise RuntimeError("interactive discovery requires the optional 'browser' dependency") from exc
 
