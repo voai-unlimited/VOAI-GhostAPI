@@ -233,6 +233,37 @@ def test_crawl_honors_robots_and_retries_transient_failures(tmp_path, monkeypatc
     assert all("blocked" not in str(item) for item in report["pages"])
 
 
+def test_crawl_rejects_redirects_to_another_origin(tmp_path, monkeypatch):
+    class Response:
+        def __init__(self, url: str, status: int, headers: dict[str, str] | None = None):
+            self.url = url
+            self.status_code = status
+            self.headers = {"content-type": "text/plain", **(headers or {})}
+            self.content = b""
+            self.text = ""
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            if url.endswith(("robots.txt", "sitemap.xml")):
+                return Response(url, 404)
+            return Response(url, 302, {"location": "http://127.0.0.1/private"})
+
+    monkeypatch.setattr(extract_module, "validate_url", lambda value: value)
+    monkeypatch.setattr(extract_module.httpx, "AsyncClient", Client)
+    report = asyncio.run(extract_module.crawl("https://example.test/", tmp_path / "website"))
+    assert report["failed"] == 1
+    assert "redirect leaves" in str(report["pages"][0]["error"])
+
+
 def test_crawl_persists_checkpoint_when_cancelled(tmp_path, monkeypatch):
     class Response:
         def __init__(self):

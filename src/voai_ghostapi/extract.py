@@ -191,6 +191,36 @@ def _normalize(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
 
 
+async def _get_with_safe_redirects(client: httpx.AsyncClient, url: str, origin: str) -> httpx.Response:
+    request_url = url
+    for _redirect in range(5):
+        response: httpx.Response | None = None
+        for attempt in range(3):
+            try:
+                candidate = await client.get(request_url)
+                response = candidate
+                if candidate.status_code not in {429, 500, 502, 503, 504}:
+                    break
+            except httpx.HTTPError:
+                if attempt == 2:
+                    raise
+            await asyncio.sleep(0.2 * (2**attempt))
+        if response is None:
+            raise httpx.HTTPError("no response")
+        if 300 <= response.status_code < 400:
+            location = response.headers.get("location")
+            if not location:
+                return response
+            redirected = _normalize(urljoin(request_url, location))
+            validate_url(redirected)
+            if urlsplit(redirected).netloc.lower() != origin:
+                raise ValueError("redirect leaves the requested origin")
+            request_url = redirected
+            continue
+        return response
+    raise httpx.HTTPError("too many redirects")
+
+
 async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, object]:
     start = validate_url(url)
     origin = urlsplit(start).netloc.lower()
@@ -223,7 +253,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
         if progress:
             progress({"stage": "complete", "processed": 0, "pending": len(queue), "failed": 0})
         return report
-    async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+    async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
         if progress:
             progress({"stage": "robots", "current": start})
         robots = urllib.robotparser.RobotFileParser()
@@ -261,19 +291,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
             if progress:
                 progress({"stage": "page", "current": current, "discovered": len(seen), "pending": len(queue)})
             try:
-                response = None
-                for attempt in range(3):
-                    try:
-                        candidate_response = await client.get(current)
-                        response = candidate_response
-                        if candidate_response.status_code not in {429, 500, 502, 503, 504}:
-                            break
-                    except httpx.HTTPError:
-                        if attempt == 2:
-                            raise
-                    await asyncio.sleep(0.2 * (2**attempt))
-                if response is None:
-                    raise httpx.HTTPError("no response")
+                response = await _get_with_safe_redirects(client, current, origin)
                 validate_url(str(response.url))
                 content = response.content
                 if len(content) > max_resource_bytes or total_bytes + len(content) > max_total_bytes:
