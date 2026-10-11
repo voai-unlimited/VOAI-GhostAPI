@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -146,7 +147,11 @@ def test_large_extract_requires_explicit_threshold_confirmation(tmp_path):
         ["extract", "--url", "https://example.test", "--scope", "site", "--max-pages", "50", "--yes", "--output", str(tmp_path / "out")],
     )
     assert result.exit_code != 0
-    assert "confirm-large" in result.output
+    # Rich may wrap the option name at a terminal-width-dependent boundary.
+    # Normalize whitespace before checking the safety diagnostic so this test
+    # remains stable across the Windows, Linux, and macOS runners.
+    diagnostic = re.sub(r"\s+", "", result.output)
+    assert "confirm-large" in diagnostic
 
 
 def test_cli_complete_workflow(tmp_path):
