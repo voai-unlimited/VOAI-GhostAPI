@@ -386,7 +386,16 @@ def generate(workspace: Workspace, output: Path) -> None:
     _safe_output(output)
     routes = []
     seen = set()
-    for o in workspace.observations:
+    ordered_observations = sorted(
+        workspace.observations,
+        key=lambda item: (
+            str(item.method).upper(),
+            route_path(item.path),
+            int(item.status),
+            json.dumps(item.response_body, sort_keys=True, default=str),
+        ),
+    )
+    for o in ordered_observations:
         if o.method not in ALLOWED_METHODS:
             raise ValueError("unsupported HTTP method")
         route = route_path(o.path)

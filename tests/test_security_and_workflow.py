@@ -200,7 +200,7 @@ def test_unified_generation_is_deterministic_for_variant_order(tmp_path):
     first = tmp_path / "first"
     second = tmp_path / "second"
     generate(build_inventory(observations), first)
-    generate(build_inventory(list(reversed(observations))), second)
+    generate(Workspace(observations=list(reversed(observations))), second)
     assert (first / "app.py").read_text(encoding="utf-8") == (second / "app.py").read_text(encoding="utf-8")
 
 
