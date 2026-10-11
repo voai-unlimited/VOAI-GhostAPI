@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Observation(BaseModel):
@@ -19,6 +19,14 @@ class Observation(BaseModel):
     status: int
     response_headers: dict[str, str] = Field(default_factory=dict)
     response_body: Any = None
+    source: str = "har"
+    source_page: str | None = None
+
+    @field_validator("method")
+    @classmethod
+    def normalize_method(cls, value: str) -> str:
+        """Keep the inventory method representation deterministic."""
+        return str(value).strip().upper()
 
 
 class Workspace(BaseModel):
@@ -153,16 +161,27 @@ def merge_schemas(shapes: list[Any]) -> Any:
     return result
 
 
-def _safe_output(output: Path) -> None:
+def _safe_output(output: Path, *, allow_nonempty: bool = False) -> None:
     if output.is_symlink():
         raise ValueError("output path may not be a symlink")
     for parent in output.parents:
         if parent == parent.parent:
             break
-        if parent.is_symlink():
+        # macOS exposes the system temporary directory through the conventional
+        # ``/var`` alias (which resolves to ``/private/var``).  This platform
+        # alias is safe and is used by pytest's temporary directories; arbitrary
+        # symlinked components remain rejected so output cannot be redirected.
+        is_macos_var_alias = (
+            parent == Path("/var")
+            and parent.is_symlink()
+            and parent.resolve() == Path("/private/var")
+        )
+        if parent.is_symlink() and not is_macos_var_alias:
             raise ValueError("output path may not traverse a symlink")
-    if output.exists() and any(output.iterdir()):
-        raise ValueError("output directory must be empty")
+    if output.exists() and not allow_nonempty and any(output.iterdir()):
+        raise ValueError(
+            "output directory must be empty; choose a new --output path or remove the existing output"
+        )
     output.mkdir(parents=True, exist_ok=True)
 
 
@@ -244,18 +263,10 @@ def import_har(
             )
         except (KeyError, TypeError, ValueError):
             warnings.append("Skipped malformed HAR entry")
-    grouped: dict[str, list[Any]] = {}
-    for observation in observations:
-        if observation.response_body is not None:
-            grouped.setdefault(
-                f"{observation.method} {route_path(observation.path)}", []
-            ).append(infer_schema(observation.response_body))
-    schemas = {key: merge_schemas(shapes) for key, shapes in sorted(grouped.items())}
-    ws = Workspace(
-        observations=observations,
+    ws = build_inventory(
+        observations,
         warnings=warnings,
         sanitized_values=count[0],
-        schemas=schemas,
     )
     _safe_output(output)
     (output / "workspace.json").write_text(
@@ -276,9 +287,13 @@ def load_workspace(path: Path) -> Workspace:
 def route_path(path: str) -> str:
     if any(ord(ch) < 32 or ch in "\r\n" for ch in path):
         raise ValueError("unsafe route path")
+    raw_path = urlsplit(path).path if "://" in path else path.split("?", 1)[0]
+    raw_path = raw_path or "/"
+    if not raw_path.startswith("/"):
+        raw_path = "/" + raw_path
     dynamic_index = 0
     result = []
-    for part in path.split("/"):
+    for part in raw_path.split("/"):
         if part.isdigit() or UUID.match(part):
             dynamic_index += 1
             result.append(
@@ -289,11 +304,68 @@ def route_path(path: str) -> str:
     return "/".join(result) or "/"
 
 
+def merge_observations(observations: list[Observation]) -> list[Observation]:
+    """Normalize and deduplicate equivalent observations deterministically."""
+    merged: dict[tuple[str, str, int, str], Observation] = {}
+    for original in observations:
+        method = str(original.method).strip().upper()
+        route = route_path(original.path)
+        observation = original.model_copy(update={"method": method})
+        key = (
+            method,
+            route,
+            int(observation.status),
+            json.dumps(observation.response_body, sort_keys=True, default=str),
+        )
+        previous = merged.get(key)
+        if previous is None:
+            merged[key] = observation
+            continue
+        if previous.source != observation.source:
+            previous.source = "both"
+        if previous.source_page is None:
+            previous.source_page = observation.source_page
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            item.method,
+            route_path(item.path),
+            item.status,
+            json.dumps(item.response_body, sort_keys=True, default=str),
+            item.source,
+        ),
+    )
+
+
+def build_inventory(
+    observations: list[Observation],
+    *,
+    warnings: list[str] | None = None,
+    sanitized_values: int = 0,
+) -> Workspace:
+    """Build the shared workspace representation used by every extraction mode."""
+    normalized = merge_observations(observations)
+    grouped: dict[str, list[Any]] = {}
+    for observation in normalized:
+        if observation.response_body is not None:
+            grouped.setdefault(f"{observation.method} {route_path(observation.path)}", []).append(
+                infer_schema(observation.response_body)
+            )
+    return Workspace(
+        observations=normalized,
+        warnings=sorted(warnings or []),
+        sanitized_values=sanitized_values,
+        schemas={key: merge_schemas(value) for key, value in sorted(grouped.items())},
+    )
+
+
 def validate_workspace(workspace: Workspace) -> list[str]:
     errors: list[str] = []
     if workspace.version != "1":
         errors.append("unsupported workspace version")
     for observation in workspace.observations:
+        if observation.source not in {"har", "website", "both", "combined"}:
+            errors.append("invalid observation source")
         if observation.method not in ALLOWED_METHODS:
             errors.append("unsupported HTTP method")
         try:
@@ -316,7 +388,16 @@ def generate(workspace: Workspace, output: Path) -> None:
     _safe_output(output)
     routes = []
     seen = set()
-    for o in workspace.observations:
+    ordered_observations = sorted(
+        workspace.observations,
+        key=lambda item: (
+            str(item.method).upper(),
+            route_path(item.path),
+            int(item.status),
+            json.dumps(item.response_body, sort_keys=True, default=str),
+        ),
+    )
+    for o in ordered_observations:
         if o.method not in ALLOWED_METHODS:
             raise ValueError("unsupported HTTP method")
         route = route_path(o.path)
@@ -334,6 +415,14 @@ def generate(workspace: Workspace, output: Path) -> None:
         {"method": method, "path": route, "status": status, "body": json.loads(body)}
         for method, route, status, body in routes
     ]
+    route_data.sort(
+        key=lambda item: (
+            str(item["method"]),
+            str(item["path"]),
+            int(item["status"]),
+            json.dumps(item["body"], sort_keys=True, default=str),
+        )
+    )
     serialized = json.dumps(route_data, ensure_ascii=False, sort_keys=True)
     lines = [
         "import inspect",
@@ -356,4 +445,3 @@ def generate(workspace: Workspace, output: Path) -> None:
         "# Generated mock\n\nRun `uvicorn app:app --host 127.0.0.1 --port 8000`.\n",
         encoding="utf-8",
     )
-

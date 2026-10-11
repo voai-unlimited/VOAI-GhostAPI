@@ -9,8 +9,10 @@ from fastapi.testclient import TestClient
 from voai_ghostapi.core import (
     Observation,
     Workspace,
+    build_inventory,
     generate,
     import_har,
+    route_path,
     validate_workspace,
 )
 
@@ -154,6 +156,54 @@ def test_schema_aggregation_is_deterministic(tmp_path):
     assert "null" in schema["properties"]["id"]["type"]
 
 
+def test_unified_inventory_normalizes_routes_and_preserves_variants():
+    workspace = build_inventory(
+        [
+            Observation(
+                method="get",
+                url="<ORIGIN>/items/1",
+                path="/items/1",
+                status=200,
+                response_body={"value": 1},
+                source="har",
+            ),
+            Observation(
+                method="GET",
+                url="<ORIGIN>/items/2",
+                path="/items/2",
+                status=200,
+                response_body={"value": 1},
+                source="website",
+            ),
+            Observation(
+                method="GET",
+                url="<ORIGIN>/items/3",
+                path="/items/3",
+                status=200,
+                response_body={"value": 2},
+                source="website",
+            ),
+        ]
+    )
+    assert len(workspace.observations) == 2
+    assert workspace.observations[0].method == "GET"
+    assert workspace.observations[0].source == "both"
+    assert workspace.schemas["GET /items/{param}"]["type"] == ["object"]
+    assert route_path("items/42?tracking=1") == "/items/{param}"
+
+
+def test_unified_generation_is_deterministic_for_variant_order(tmp_path):
+    observations = [
+        Observation(method="GET", url="<ORIGIN>/x/2", path="/x/2", status=201, response_body={"b": 2}),
+        Observation(method="GET", url="<ORIGIN>/x/1", path="/x/1", status=200, response_body={"a": 1}),
+    ]
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    generate(build_inventory(observations), first)
+    generate(Workspace(observations=list(reversed(observations))), second)
+    assert (first / "app.py").read_text(encoding="utf-8") == (second / "app.py").read_text(encoding="utf-8")
+
+
 def test_multiple_dynamic_path_parameters_are_distinct(tmp_path):
     if sys.version_info >= (3, 15):
         pytest.skip(
@@ -244,4 +294,3 @@ def test_generated_fastapi_route(tmp_path):
         and parameter["in"] == "path"
         and parameter["required"] is True
     )
-

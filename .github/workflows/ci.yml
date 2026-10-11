@@ -36,4 +36,3 @@ jobs:
         run: |
           .wheel-smoke/bin/voai-ghostapi --help
           .wheel-smoke/bin/voai-ghostapi --version
-
