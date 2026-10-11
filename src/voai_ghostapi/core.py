@@ -161,7 +161,16 @@ def _safe_output(output: Path) -> None:
     for parent in output.parents:
         if parent == parent.parent:
             break
-        if parent.is_symlink():
+        # macOS exposes the system temporary directory through the conventional
+        # ``/var`` alias (which resolves to ``/private/var``).  This platform
+        # alias is safe and is used by pytest's temporary directories; arbitrary
+        # symlinked components remain rejected so output cannot be redirected.
+        is_macos_var_alias = (
+            parent == Path("/var")
+            and parent.is_symlink()
+            and parent.resolve() == Path("/private/var")
+        )
+        if parent.is_symlink() and not is_macos_var_alias:
             raise ValueError("output path may not traverse a symlink")
     if output.exists() and any(output.iterdir()):
         raise ValueError("output directory must be empty")
