@@ -133,6 +133,10 @@ Use `clear` to explicitly select no downloadable website resources. HAR inputs a
 prevalidated before confirmation and persistent workspace creation. Combined runs
 keep website resources under `website/` and mark exact duplicate observations from
 both pipelines with source `both`.
+HAR, website, and combined API observations are normalized into the same versioned
+workspace inventory before schema inference and FastAPI generation. Equivalent dynamic
+routes are deduplicated, distinct status or response variants remain represented, and
+generated output refuses to overwrite a non-empty directory.
 
 To preview a generated snapshot locally:
 

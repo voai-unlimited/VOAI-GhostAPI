@@ -25,10 +25,8 @@ from .core import (
     Observation,
     Workspace,
     _safe_output,
+    build_inventory,
     import_har,
-    infer_schema,
-    merge_schemas,
-    route_path,
     sanitize,
 )
 
@@ -149,22 +147,8 @@ def _observation_key(observation: Observation) -> tuple[str, str, int, str]:
 
 
 def _merge_observations(observations: list[Observation]) -> list[Observation]:
-    """Deduplicate exact observations and retain both-source provenance."""
-    merged: dict[tuple[str, str, int, str], Observation] = {}
-    for observation in observations:
-        key = _observation_key(observation)
-        previous = merged.get(key)
-        if previous is None:
-            merged[key] = observation
-            continue
-        if previous.source != observation.source:
-            previous.source = "both"
-        if previous.source_page is None:
-            previous.source_page = observation.source_page
-    return sorted(
-        merged.values(),
-        key=lambda item: (item.method, item.path, item.status, item.source),
-    )
+    """Compatibility wrapper for the shared inventory merge pipeline."""
+    return build_inventory(observations).observations
 
 
 def _resource_kind(content_type: str, url: str) -> str:
@@ -804,12 +788,11 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
                 if key not in seen:
                     seen.add(key)
                     observations.append(observation.model_copy(update={"source": "har"}))
-        observations.sort(key=lambda item: (item.method, item.path, item.status, json.dumps(item.response_body, sort_keys=True, default=str)))
-        grouped: dict[str, list[object]] = {}
-        for observation in observations:
-            if observation.response_body is not None:
-                grouped.setdefault(f"{observation.method} {route_path(observation.path)}", []).append(infer_schema(observation.response_body))
-        workspace = Workspace(observations=observations, warnings=[warning for item in imported for warning in item.warnings], sanitized_values=sum(item.sanitized_values for item in imported), schemas={key: merge_schemas(value) for key, value in sorted(grouped.items())})
+        workspace = build_inventory(
+            observations,
+            warnings=[warning for item in imported for warning in item.warnings],
+            sanitized_values=sum(item.sanitized_values for item in imported),
+        )
         (output / "workspace").mkdir()
         (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
     if url:
@@ -829,15 +812,12 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
             if isinstance(item, dict)
         ]
         if website_observations:
-            if workspace is None:
-                workspace = Workspace()
-            workspace.observations.extend(website_observations)
-            workspace.observations = _merge_observations(workspace.observations)
-            grouped_website: dict[str, list[object]] = {}
-            for observation in workspace.observations:
-                if observation.response_body is not None:
-                    grouped_website.setdefault(f"{observation.method} {route_path(observation.path)}", []).append(infer_schema(observation.response_body))
-            workspace.schemas = {key: merge_schemas(value) for key, value in sorted(grouped_website.items())}
+            combined = [*(workspace.observations if workspace else []), *website_observations]
+            workspace = build_inventory(
+                combined,
+                warnings=workspace.warnings if workspace else [],
+                sanitized_values=workspace.sanitized_values if workspace else 0,
+            )
             (output / "workspace").mkdir(exist_ok=True)
             (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
         if snapshot:

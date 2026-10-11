@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qsl, urlsplit
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Observation(BaseModel):
@@ -21,6 +21,12 @@ class Observation(BaseModel):
     response_body: Any = None
     source: str = "har"
     source_page: str | None = None
+
+    @field_validator("method")
+    @classmethod
+    def normalize_method(cls, value: str) -> str:
+        """Keep the inventory method representation deterministic."""
+        return str(value).strip().upper()
 
 
 class Workspace(BaseModel):
@@ -255,18 +261,10 @@ def import_har(
             )
         except (KeyError, TypeError, ValueError):
             warnings.append("Skipped malformed HAR entry")
-    grouped: dict[str, list[Any]] = {}
-    for observation in observations:
-        if observation.response_body is not None:
-            grouped.setdefault(
-                f"{observation.method} {route_path(observation.path)}", []
-            ).append(infer_schema(observation.response_body))
-    schemas = {key: merge_schemas(shapes) for key, shapes in sorted(grouped.items())}
-    ws = Workspace(
-        observations=observations,
+    ws = build_inventory(
+        observations,
         warnings=warnings,
         sanitized_values=count[0],
-        schemas=schemas,
     )
     _safe_output(output)
     (output / "workspace.json").write_text(
@@ -287,9 +285,13 @@ def load_workspace(path: Path) -> Workspace:
 def route_path(path: str) -> str:
     if any(ord(ch) < 32 or ch in "\r\n" for ch in path):
         raise ValueError("unsafe route path")
+    raw_path = urlsplit(path).path if "://" in path else path.split("?", 1)[0]
+    raw_path = raw_path or "/"
+    if not raw_path.startswith("/"):
+        raw_path = "/" + raw_path
     dynamic_index = 0
     result = []
-    for part in path.split("/"):
+    for part in raw_path.split("/"):
         if part.isdigit() or UUID.match(part):
             dynamic_index += 1
             result.append(
@@ -298,6 +300,61 @@ def route_path(path: str) -> str:
         else:
             result.append(part)
     return "/".join(result) or "/"
+
+
+def merge_observations(observations: list[Observation]) -> list[Observation]:
+    """Normalize and deduplicate equivalent observations deterministically."""
+    merged: dict[tuple[str, str, int, str], Observation] = {}
+    for original in observations:
+        method = str(original.method).strip().upper()
+        route = route_path(original.path)
+        observation = original.model_copy(update={"method": method})
+        key = (
+            method,
+            route,
+            int(observation.status),
+            json.dumps(observation.response_body, sort_keys=True, default=str),
+        )
+        previous = merged.get(key)
+        if previous is None:
+            merged[key] = observation
+            continue
+        if previous.source != observation.source:
+            previous.source = "both"
+        if previous.source_page is None:
+            previous.source_page = observation.source_page
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            item.method,
+            route_path(item.path),
+            item.status,
+            json.dumps(item.response_body, sort_keys=True, default=str),
+            item.source,
+        ),
+    )
+
+
+def build_inventory(
+    observations: list[Observation],
+    *,
+    warnings: list[str] | None = None,
+    sanitized_values: int = 0,
+) -> Workspace:
+    """Build the shared workspace representation used by every extraction mode."""
+    normalized = merge_observations(observations)
+    grouped: dict[str, list[Any]] = {}
+    for observation in normalized:
+        if observation.response_body is not None:
+            grouped.setdefault(f"{observation.method} {route_path(observation.path)}", []).append(
+                infer_schema(observation.response_body)
+            )
+    return Workspace(
+        observations=normalized,
+        warnings=sorted(warnings or []),
+        sanitized_values=sanitized_values,
+        schemas={key: merge_schemas(value) for key, value in sorted(grouped.items())},
+    )
 
 
 def validate_workspace(workspace: Workspace) -> list[str]:
@@ -347,6 +404,14 @@ def generate(workspace: Workspace, output: Path) -> None:
         {"method": method, "path": route, "status": status, "body": json.loads(body)}
         for method, route, status, body in routes
     ]
+    route_data.sort(
+        key=lambda item: (
+            str(item["method"]),
+            str(item["path"]),
+            int(item["status"]),
+            json.dumps(item["body"], sort_keys=True, default=str),
+        )
+    )
     serialized = json.dumps(route_data, ensure_ascii=False, sort_keys=True)
     lines = [
         "import inspect",
