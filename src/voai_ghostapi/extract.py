@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 from collections import deque
 from html.parser import HTMLParser
 from pathlib import Path
+from typing import cast
 from urllib.parse import urldefrag, urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -269,7 +270,7 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
         (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
     if url:
         report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, resume=resume)
-        raw_api_observations = report.get("api_observations", [])
+        raw_api_observations = cast(list[object], report.get("api_observations", []))
         website_observations = [
             Observation(
                 method=str(item["method"]),
