@@ -135,6 +135,26 @@ def build_snapshot(website_dir: Path, snapshot_dir: Path) -> dict[str, object]:
                     current = destination.relative_to(snapshot_dir).parent.as_posix()
                     replacement = posixpath.relpath(local, current or ".")
                     text = text.replace(match.group("prefix") + reference, match.group("prefix") + replacement, 1)
+            def rewrite_srcset(
+                match: re.Match[str],
+                *,
+                source_url: str = source_url,
+                destination: Path = destination,
+            ) -> str:
+                prefix, references = match.group("prefix"), match.group("refs")
+                rewritten: list[str] = []
+                for candidate in references.split(","):
+                    pieces = candidate.strip().split(None, 1)
+                    if not pieces:
+                        continue
+                    target = url_map.get(_normalize(urljoin(source_url, pieces[0]))) if source_url else None
+                    if target:
+                        current = destination.relative_to(snapshot_dir).parent.as_posix()
+                        pieces[0] = posixpath.relpath(Path(target).as_posix(), current or ".")
+                    rewritten.append(" ".join(pieces))
+                return prefix + ", ".join(rewritten) + match.group("quote")
+
+            text = re.sub(r"(?P<prefix>srcset=[\"'])(?P<refs>[^\"']+)(?P<quote>[\"'])", rewrite_srcset, text, flags=re.IGNORECASE)
             destination.write_text(text, encoding="utf-8")
         elif source.suffix.lower() == ".css":
             text = content.decode("utf-8", "replace")

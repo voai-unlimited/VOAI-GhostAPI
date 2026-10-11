@@ -32,7 +32,7 @@ def test_build_snapshot_copies_resources_and_writes_manifest(tmp_path):
     website = tmp_path / "website"
     website.mkdir()
     (website / "resources").mkdir()
-    (website / "resources" / "page.html").write_text('<html><a href="https://example.test/api.json">API</a></html>')
+    (website / "resources" / "page.html").write_text('<html><a href="https://example.test/api.json">API</a><img srcset="https://example.test/hero.png 1x, https://example.test/hero.png 2x"></html>')
     (website / "resources" / "style.css").write_text("body { background: url('https://example.test/hero.png'); }")
     (website / "extraction.json").write_text(json.dumps({"pages": [{"url": "https://example.test/", "path": "resources/page.html"}, {"url": "https://example.test/api.json", "path": "resources/api.json"}]}))
     (website / "resources" / "api.json").write_text('{"ok": true}')
@@ -48,6 +48,7 @@ def test_build_snapshot_copies_resources_and_writes_manifest(tmp_path):
     assert report["files"] == 5
     assert (snapshot / "resources" / "page.html").exists()
     assert 'href="api.json"' in (snapshot / "resources" / "page.html").read_text()
+    assert 'srcset="hero.png 1x, hero.png 2x"' in (snapshot / "resources" / "page.html").read_text()
     assert "url('hero.png')" in (snapshot / "resources" / "style.css").read_text()
     assert "fetch('api.json')" in (snapshot / "resources" / "app.js").read_text()
     assert json.loads((snapshot / "snapshot.json").read_text())["files"] == 5
