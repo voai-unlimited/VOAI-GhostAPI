@@ -45,7 +45,7 @@ environment with the Windows activation script:
 
 ```powershell
 cd path\to\VOAI-GhostAPI
-python -m venv .venv-new
+py -3.12 -m venv .venv-new
 .\.venv-new\Scripts\Activate.ps1
 # Verify that both Python and pip come from this environment.
 python -c "import sys; print(sys.executable)"
@@ -55,17 +55,27 @@ voai-ghostapi --help
 voai-ghostapi --version
 ```
 
-In Bash (including Git Bash on Windows), use the Bash activation script. On
-Linux and macOS, the virtual environment uses `bin` instead of `Scripts`:
+In Git Bash on Windows, use the Bash activation script and the Python launcher:
 
 ```bash
 cd /path/to/VOAI-GhostAPI
-python -m venv .venv-new
-# Git Bash on Windows:
+py -3.12 -m venv .venv-new
 . .venv-new/Scripts/activate
-# Linux or macOS (use this instead of the line above):
-# . .venv-new/bin/activate
 # Verify that the active interpreter is the new environment before continuing.
+python -c 'import sys; print(sys.executable)'
+python -m pip --version
+python -m pip install -e '.[dev]'
+voai-ghostapi --help
+voai-ghostapi --version
+```
+
+On Linux or macOS, use the versioned interpreter and the `bin` activation
+directory instead:
+
+```bash
+cd /path/to/VOAI-GhostAPI
+python3.12 -m venv .venv-new
+. .venv-new/bin/activate
 python -c 'import sys; print(sys.executable)'
 python -m pip --version
 python -m pip install -e '.[dev]'
