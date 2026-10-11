@@ -223,6 +223,8 @@ def build_snapshot(website_dir: Path, snapshot_dir: Path) -> dict[str, object]:
     mapping: dict[str, str] = {}
     url_map: dict[str, str] = {}
     path_to_url: dict[str, str] = {}
+    website_root = website_dir.resolve()
+    skipped_sources: list[str] = []
     report_path = website_dir / "extraction.json"
     if report_path.is_file():
         try:
@@ -232,6 +234,11 @@ def build_snapshot(website_dir: Path, snapshot_dir: Path) -> dict[str, object]:
                 if isinstance(page, dict) and page.get("url") and page.get("path"):
                     original = str(page["url"])
                     relative = str(page["path"]).replace("\\", "/")
+                    relative_path = Path(relative)
+                    if relative_path.is_absolute() or ".." in relative_path.parts:
+                        continue
+                    if not (website_dir / relative_path).is_file():
+                        continue
                     url_map[_normalize(original)] = relative
                     url_map.setdefault(original, relative)
                     path_to_url.setdefault(relative, original)
@@ -261,7 +268,15 @@ def build_snapshot(website_dir: Path, snapshot_dir: Path) -> dict[str, object]:
         return None
 
     for source in website_dir.rglob("*"):
-        if not source.is_file() or source.name == "extraction.json":
+        if source.name == "extraction.json":
+            continue
+        if source.is_symlink() or not source.is_file():
+            skipped_sources.append(str(source.relative_to(website_dir)).replace("\\", "/"))
+            continue
+        try:
+            source.resolve().relative_to(website_root)
+        except ValueError:
+            skipped_sources.append(str(source.relative_to(website_dir)).replace("\\", "/"))
             continue
         destination = snapshot_dir / source.relative_to(website_dir)
         destination.parent.mkdir(parents=True, exist_ok=True)
@@ -329,6 +344,7 @@ def build_snapshot(website_dir: Path, snapshot_dir: Path) -> dict[str, object]:
         "files": copied,
         "mapping": mapping,
         "url_mapping": url_map,
+        "skipped_sources": skipped_sources,
         "unresolved_references": unresolved,
         "limitations": limitations,
     }
