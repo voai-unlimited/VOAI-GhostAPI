@@ -132,6 +132,8 @@ def extract(
     yes: bool = typer.Option(False, "--yes"),
     max_pages: int = typer.Option(20, min=1, max=1000),
     max_depth: int = typer.Option(1, min=0, max=20),
+    concurrency: int = typer.Option(4, min=1, max=32, help="Maximum concurrent page requests."),
+    crawl_delay: float | None = typer.Option(None, min=0, max=60, help="Minimum seconds between requests."),
     scope: str = typer.Option("page", help="Extraction scope: page, site, or selected."),
     pages: str = typer.Option("", "--pages", help="Comma-separated page URLs or paths for selected scope."),
     resources: str = typer.Option("html,css,js,images,json", help="Comma-separated resource types."),
@@ -178,7 +180,7 @@ def extract(
                 console.print(f"Extraction complete: {event.get('processed', 0)} pages, {event.get('failed', 0)} failed")
 
         workspace = __import__("asyncio").run(
-            extract_website(url or "", output, tuple(har), yes=True, max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, snapshot=snapshot, max_resource_bytes=max_resource_mb * 1024 * 1024, max_total_bytes=max_total_mb * 1024 * 1024, resume=resume, progress=show_progress, selected_pages=selected_pages)
+            extract_website(url or "", output, tuple(har), yes=True, max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, snapshot=snapshot, max_resource_bytes=max_resource_mb * 1024 * 1024, max_total_bytes=max_total_mb * 1024 * 1024, resume=resume, progress=show_progress, selected_pages=selected_pages)
         )
     except (OSError, ValueError) as exc:
         console.print(f"[red]Extraction error:[/red] {exc}")

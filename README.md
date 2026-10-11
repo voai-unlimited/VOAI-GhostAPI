@@ -100,10 +100,12 @@ voai-ghostapi wizard
 
 Website output is kept under `website/`; optional snapshots are under `snapshot/`.
 The crawler stays on the requested origin, blocks local and private destinations,
-and applies page, depth, per-resource, and total-download limits. `--interactive` is an optional browser-backed,
+and applies page, depth, concurrency, crawl-delay, per-resource, and total-download limits. `--interactive` is an optional browser-backed,
 read-only observation pass installed with `pip install .[browser]` and a Playwright browser runtime. It records
 observed JSON responses in `website/interactive.json`; it does not click controls or replay state-changing requests.
 Authentication flows and complete offline behavior are not inferred automatically.
+The crawler reads same-origin XML sitemap sets and nested sitemap indexes, uses breadth-first batches,
+normalizes tracking query parameters, and caps query variants per path to prevent pagination loops.
 Authorized browser sessions can be supplied with a Playwright storage-state JSON file.
 Read-only recipes in a JSON array support `click`, `fill`, `select`, and bounded
 `scroll` actions; each observed response records the triggering interaction. Unknown

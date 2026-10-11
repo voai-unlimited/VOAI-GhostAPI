@@ -97,6 +97,133 @@ def test_resource_kind_and_suffix_cover_non_api_assets():
 def test_normalize_removes_fragments_and_preserves_query():
     assert _normalize("https://example.test/a#section") == "https://example.test/a"
     assert _normalize("https://example.test/a?x=1#section") == "https://example.test/a?x=1"
+    assert _normalize("https://example.test/a?utm_source=mail&b=2&a=1") == "https://example.test/a?a=1&b=2"
+
+
+def test_crawl_reads_nested_sitemap_indexes(tmp_path, monkeypatch):
+    class Response:
+        def __init__(self, url: str, body: bytes, content_type: str):
+            self.url = url
+            self.content = body
+            self.status_code = 200
+            self.headers = {"content-type": content_type}
+            self.text = body.decode("utf-8")
+
+        def json(self):
+            return json.loads(self.text)
+
+    responses = {
+        "https://example.test/robots.txt": Response("https://example.test/robots.txt", b"", "text/plain"),
+        "https://example.test/sitemap.xml": Response("https://example.test/sitemap.xml", b"<sitemapindex><sitemap><loc>/nested.xml</loc></sitemap></sitemapindex>", "application/xml"),
+        "https://example.test/nested.xml": Response("https://example.test/nested.xml", b"<urlset><url><loc>/from-sitemap</loc></url></urlset>", "application/xml"),
+        "https://example.test/": Response("https://example.test/", b"<p>root</p>", "text/html"),
+        "https://example.test/from-sitemap": Response("https://example.test/from-sitemap", b"<p>page</p>", "text/html"),
+    }
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            return responses[url]
+
+    monkeypatch.setattr(extract_module, "validate_url", lambda value: value)
+    monkeypatch.setattr(extract_module.httpx, "AsyncClient", Client)
+    report = asyncio.run(extract_module.crawl("https://example.test/", tmp_path / "website", max_pages=2))
+    assert {item["url"] for item in report["pages"]} == {
+        "https://example.test/",
+        "https://example.test/from-sitemap",
+    }
+
+
+def test_crawl_batches_requests_with_bounded_concurrency(tmp_path, monkeypatch):
+    class Response:
+        def __init__(self, url: str, body: bytes, content_type: str = "text/html"):
+            self.url = url
+            self.content = body
+            self.status_code = 200
+            self.headers = {"content-type": content_type}
+            self.text = body.decode("utf-8")
+
+        def json(self):
+            return json.loads(self.text)
+
+    responses = {
+        "https://example.test/robots.txt": Response("https://example.test/robots.txt", b"", "text/plain"),
+        "https://example.test/sitemap.xml": Response("https://example.test/sitemap.xml", b"<urlset />", "application/xml"),
+        "https://example.test/": Response("https://example.test/", b"<a href='/a'>a</a><a href='/b'>b</a><a href='/c'>c</a><a href='/d'>d</a>"),
+    }
+    for name in "abcd":
+        responses[f"https://example.test/{name}"] = Response(f"https://example.test/{name}", b"<p>page</p>")
+    active = 0
+    maximum = 0
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            nonlocal active, maximum
+            active += 1
+            maximum = max(maximum, active)
+            await asyncio.sleep(0)
+            active -= 1
+            return responses[url]
+
+    monkeypatch.setattr(extract_module, "validate_url", lambda value: value)
+    monkeypatch.setattr(extract_module.httpx, "AsyncClient", Client)
+    report = asyncio.run(extract_module.crawl("https://example.test/", tmp_path / "website", max_pages=5, concurrency=2))
+    assert report["processed"] == 5
+    assert 1 < maximum <= 2
+
+
+def test_crawl_caps_query_variants_to_prevent_loops(tmp_path, monkeypatch):
+    class Response:
+        def __init__(self, url: str, body: bytes):
+            self.url = url
+            self.content = body
+            self.status_code = 200
+            self.headers = {"content-type": "text/html"}
+            self.text = body.decode("utf-8")
+
+    responses = {
+        "https://example.test/robots.txt": Response("https://example.test/robots.txt", b""),
+        "https://example.test/sitemap.xml": Response("https://example.test/sitemap.xml", b"<urlset />"),
+        "https://example.test/": Response("https://example.test/", b"<a href='/?utm_source=a'>1</a><a href='/?x=1'>2</a><a href='/?x=2'>3</a><a href='/?x=3'>4</a><a href='/?x=4'>5</a>"),
+    }
+    for index in range(1, 5):
+        responses[f"https://example.test/?x={index}"] = Response(f"https://example.test/?x={index}", b"<p>variant</p>")
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            return responses[url]
+
+    monkeypatch.setattr(extract_module, "validate_url", lambda value: value)
+    monkeypatch.setattr(extract_module.httpx, "AsyncClient", Client)
+    report = asyncio.run(extract_module.crawl("https://example.test/", tmp_path / "website", max_pages=20))
+    assert report["processed"] == 4
+    assert report["pending"] == 0
 
 
 def test_crawl_persists_pages_resources_and_json_observations(tmp_path, monkeypatch):

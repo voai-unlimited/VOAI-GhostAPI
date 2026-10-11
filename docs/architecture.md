@@ -4,8 +4,10 @@ VOAI-GhostAPI keeps the original HAR-to-FastAPI pipeline and adds a bounded webs
 pipeline around the same observation model. `core.py` owns Pydantic observations,
 sanitization, schema inference, workspace persistence, and deterministic FastAPI
 generation. `extract.py` validates origins, follows only same-origin links, applies
-page/depth/byte limits, records resource metadata, writes resumable checkpoints, and
-merges optional HAR observations into one workspace. `interactive.py` is an optional
+page/depth/byte limits, reads nested sitemap indexes, uses bounded breadth-first
+request batches with crawl-delay rate limiting, records resource metadata, writes
+resumable checkpoints, and merges optional HAR observations into one workspace.
+`interactive.py` is an optional
 Playwright adapter for authorized, read-only recipes; it records observed JSON
 responses without replaying requests.
 

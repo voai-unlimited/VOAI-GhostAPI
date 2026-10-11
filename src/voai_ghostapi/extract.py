@@ -8,6 +8,7 @@ import posixpath
 import re
 import socket
 import tempfile
+import time
 import urllib.robotparser
 import xml.etree.ElementTree as ET
 from collections import deque
@@ -15,7 +16,7 @@ from collections.abc import Callable
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, cast
-from urllib.parse import urldefrag, urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urldefrag, urlencode, urljoin, urlsplit, urlunsplit
 
 import httpx
 
@@ -287,15 +288,48 @@ def validate_url(url: str) -> str:
 def _normalize(url: str) -> str:
     clean, _ = urldefrag(url)
     parts = urlsplit(clean)
-    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
+    tracking = {"fbclid", "gclid", "dclid", "mc_cid", "mc_eid"}
+    pairs = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if not key.lower().startswith("utm_") and key.lower() not in tracking
+    ]
+    pairs.sort()
+    query = urlencode(pairs, doseq=True)
+    return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", query, ""))
 
 
-async def _get_with_safe_redirects(client: httpx.AsyncClient, url: str, origin: str) -> httpx.Response:
+class _RateLimiter:
+    def __init__(self, delay: float) -> None:
+        self.delay = max(0.0, delay)
+        self._next = 0.0
+        self._lock = asyncio.Lock()
+
+    async def wait(self) -> None:
+        if self.delay <= 0:
+            return
+        async with self._lock:
+            now = time.monotonic()
+            wait_for = max(0.0, self._next - now)
+            self._next = max(now, self._next) + self.delay
+        if wait_for:
+            await asyncio.sleep(wait_for)
+
+
+async def _get_with_safe_redirects(
+    client: httpx.AsyncClient,
+    url: str,
+    origin: str,
+    *,
+    rate_limiter: _RateLimiter | None = None,
+) -> httpx.Response:
     request_url = url
     for _redirect in range(5):
         response: httpx.Response | None = None
         for attempt in range(3):
             try:
+                if rate_limiter is not None:
+                    await rate_limiter.wait()
                 candidate = await client.get(request_url)
                 response = candidate
                 if candidate.status_code not in {429, 500, 502, 503, 504}:
@@ -320,7 +354,54 @@ async def _get_with_safe_redirects(client: httpx.AsyncClient, url: str, origin: 
     raise httpx.HTTPError("too many redirects")
 
 
-async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> dict[str, object]:
+async def _read_sitemap_urls(
+    client: httpx.AsyncClient,
+    start: str,
+    origin: str,
+    *,
+    rate_limiter: _RateLimiter | None = None,
+    max_sitemaps: int = 16,
+) -> list[str]:
+    """Read urlsets and nested sitemap indexes without leaving the origin."""
+    pending = deque([_normalize(urljoin(start, "/sitemap.xml"))])
+    visited: set[str] = set()
+    pages: list[str] = []
+    while pending and len(visited) < max_sitemaps:
+        sitemap_url = pending.popleft()
+        if sitemap_url in visited or urlsplit(sitemap_url).netloc.lower() != origin:
+            continue
+        visited.add(sitemap_url)
+        try:
+            response = await _get_with_safe_redirects(
+                client, sitemap_url, origin, rate_limiter=rate_limiter
+            )
+            if response.status_code != 200:
+                continue
+            root = ET.fromstring(response.text)
+        except (httpx.HTTPError, ET.ParseError, ValueError):
+            continue
+        root_kind = root.tag.rsplit("}", 1)[-1].lower()
+        for node in root.iter():
+            if node.tag.rsplit("}", 1)[-1].lower() != "loc" or not node.text:
+                continue
+            candidate = _normalize(urljoin(sitemap_url, node.text.strip()))
+            if urlsplit(candidate).netloc.lower() != origin:
+                continue
+            if root_kind == "sitemapindex":
+                if candidate not in visited:
+                    pending.append(candidate)
+            else:
+                try:
+                    validate_url(candidate)
+                except ValueError:
+                    continue
+                pages.append(candidate)
+    return pages
+
+
+async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> dict[str, object]:
+    if not 1 <= concurrency <= 32:
+        raise ValueError("concurrency must be between 1 and 32")
     resource_types = parse_resource_selection(resource_types)
     start = validate_url(url)
     origin = urlsplit(start).netloc.lower()
@@ -339,6 +420,28 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
         saved = json.loads(checkpoint.read_text(encoding="utf-8"))
         queue = deque((str(item[0]), int(item[1])) for item in saved.get("queue", []))
         seen = {str(item) for item in saved.get("seen", [])}
+    scheduled: set[str] = set(seen) | {item[0] for item in queue}
+    query_variants: dict[str, set[str]] = {}
+
+    def enqueue(candidate: str, depth: int) -> None:
+        candidate = _normalize(candidate)
+        parts = urlsplit(candidate)
+        if parts.netloc.lower() != origin or (allowed_pages and candidate not in allowed_pages):
+            return
+        base = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", "", ""))
+        variants = query_variants.setdefault(base, set())
+        if candidate not in variants and len(variants) >= 4:
+            return
+        variants.add(candidate)
+        if candidate in scheduled:
+            return
+        scheduled.add(candidate)
+        queue.append((candidate, depth))
+
+    for initial_url, _initial_depth in list(queue):
+        parts = urlsplit(initial_url)
+        base = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", "", ""))
+        query_variants.setdefault(base, set()).add(initial_url)
     pages: list[dict[str, object]] = []
     total_bytes = 0
     skipped = 0
@@ -357,103 +460,136 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
             progress({"stage": "complete", "processed": 0, "pending": len(queue), "failed": 0})
         return report
     async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
+        rate_limiter = _RateLimiter(crawl_delay or 0.0)
         if progress:
             progress({"stage": "robots", "current": start})
         robots = urllib.robotparser.RobotFileParser()
         try:
-            robots_response = await client.get(urljoin(start, "/robots.txt"))
+            robots_response = await _get_with_safe_redirects(
+                client, _normalize(urljoin(start, "/robots.txt")), origin, rate_limiter=rate_limiter
+            )
             robots.parse(robots_response.text.splitlines() if robots_response.status_code == 200 else [])
         except httpx.HTTPError:
             robots.parse([])
+        if crawl_delay is None:
+            try:
+                robots_delay = robots.crawl_delay("VOAI-GhostAPI")
+                if robots_delay is not None:
+                    rate_limiter.delay = min(60.0, max(0.0, float(robots_delay)))
+            except (TypeError, ValueError):
+                pass
         try:
             if progress:
                 progress({"stage": "sitemap", "current": start})
-            sitemap = await client.get(urljoin(start, "/sitemap.xml"))
-            if sitemap.status_code == 200 and "xml" in sitemap.headers.get("content-type", ""):
-                root = ET.fromstring(sitemap.text)
-                for node in root.iter():
-                    if node.tag.rsplit("}", 1)[-1] == "loc" and node.text:
-                        candidate = _normalize(urljoin(start, node.text.strip()))
-                        if urlsplit(candidate).netloc.lower() == origin:
-                            queue.append((candidate, 0))
+            for sitemap_page in await _read_sitemap_urls(
+                client, start, origin, rate_limiter=rate_limiter
+            ):
+                enqueue(sitemap_page, 0)
         except (httpx.HTTPError, ET.ParseError, ValueError):
             pass
+        semaphore = asyncio.Semaphore(concurrency)
         while queue and len(seen) < max_pages:
             if cancel_event is not None and cancel_event.is_set():
                 checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
                 break
-            current, depth = queue.popleft()
-            current = _normalize(current)
-            if current in seen or urlsplit(current).netloc.lower() != origin or (allowed_pages and current not in allowed_pages):
-                skipped += 1
-                continue
-            if not robots.can_fetch("VOAI-GhostAPI", current):
-                skipped += 1
-                continue
-            seen.add(current)
-            if progress:
-                progress({"stage": "page", "current": current, "discovered": len(seen), "pending": len(queue)})
-            try:
-                response = await _get_with_safe_redirects(client, current, origin)
-                validate_url(str(response.url))
-                content = response.content
-                if len(content) > max_resource_bytes or total_bytes + len(content) > max_total_bytes:
-                    pages.append({"url": current, "status": response.status_code, "skipped": "resource size limit"})
+            batch: list[tuple[str, int]] = []
+            while queue and len(batch) < concurrency and len(seen) + len(batch) < max_pages:
+                current, depth = queue.popleft()
+                current = _normalize(current)
+                if current in seen or urlsplit(current).netloc.lower() != origin or (allowed_pages and current not in allowed_pages):
                     skipped += 1
                     continue
-                total_bytes += len(content)
-                content_type = response.headers.get("content-type", "")
-                digest = hashlib.sha256(content).hexdigest()
-                kind = _resource_kind(content_type, current)
-                selected = "all" in resource_types or kind in selected_types
-                target = content_targets.get(digest)
-                if selected and target is None:
-                    target = resources / f"{digest}{_resource_suffix(current, content_type)}"
-                    if not target.exists():
-                        target.write_bytes(content)
-                    content_targets[digest] = target
-                record: dict[str, object] = {
-                    "url": current,
-                    "source_page": current,
-                    "status": response.status_code,
-                    "path": str(target.relative_to(output)) if target is not None else None,
-                    "sha256": digest,
-                    "size": len(content),
-                    "content_type": content_type,
-                    "extraction_status": "downloaded" if selected else "skipped by resource selection",
-                }
-                record["resource_type"] = kind
-                resource_records.append(record)
+                if not robots.can_fetch("VOAI-GhostAPI", current):
+                    skipped += 1
+                    continue
+                seen.add(current)
+                batch.append((current, depth))
+            if not batch:
+                continue
+            for current, _depth in batch:
                 if progress:
-                    progress({"stage": "resource", "current": current, "resource_type": kind, "downloaded_bytes": total_bytes})
-                if kind == "json":
-                    counter = [0]
-                    try:
-                        body: object = sanitize(response.json(), counter)
-                    except (ValueError, TypeError):
-                        body = None
-                    api_observations.append({"method": "GET", "url": current, "path": urlsplit(current).path or "/", "status": response.status_code, "response_body": body, "source": "website", "source_page": current, "sanitized_values": counter[0]})
-                pages.append(record)
-                if "text/html" in response.headers.get("content-type", "") and depth < max_depth:
-                    parser = _Links()
-                    parser.feed(response.text)
-                    for href in parser.links:
-                        candidate = _normalize(urljoin(current, href))
-                        if urlsplit(candidate).netloc.lower() == origin and (not allowed_pages or candidate in allowed_pages):
-                            queue.append((candidate, depth + 1))
-                    for href, _tag in parser.resources:
-                        candidate = _normalize(urljoin(current, href))
-                        if urlsplit(candidate).netloc.lower() == origin and (not allowed_pages or candidate in allowed_pages):
-                            queue.append((candidate, depth))
-            except asyncio.CancelledError:
-                queue.appendleft((current, depth))
-                seen.discard(current)
+                    progress({"stage": "page", "current": current, "discovered": len(seen), "pending": len(queue)})
+
+            async def fetch_page(item: tuple[str, int]) -> httpx.Response:
+                async with semaphore:
+                    return await _get_with_safe_redirects(
+                        client, item[0], origin, rate_limiter=rate_limiter
+                    )
+
+            fetched = await asyncio.gather(
+                *(fetch_page(item) for item in batch), return_exceptions=True
+            )
+            for (current, depth), fetched_response in zip(batch, fetched, strict=True):
+                if isinstance(fetched_response, asyncio.CancelledError):
+                    for pending_url, pending_depth in reversed(batch):
+                        if pending_url not in queue:
+                            queue.appendleft((pending_url, pending_depth))
+                        seen.discard(pending_url)
+                    checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
+                    raise fetched_response
+                if isinstance(fetched_response, BaseException):
+                    pages.append({"url": current, "error": str(fetched_response)})
+                    failed += 1
+                    continue
+                response = fetched_response
+                try:
+                    validate_url(str(response.url))
+                    content = response.content
+                    if len(content) > max_resource_bytes or total_bytes + len(content) > max_total_bytes:
+                        pages.append({"url": current, "status": response.status_code, "skipped": "resource size limit"})
+                        skipped += 1
+                        continue
+                    total_bytes += len(content)
+                    content_type = response.headers.get("content-type", "")
+                    digest = hashlib.sha256(content).hexdigest()
+                    kind = _resource_kind(content_type, current)
+                    selected = "all" in resource_types or kind in selected_types
+                    target = content_targets.get(digest)
+                    if selected and target is None:
+                        target = resources / f"{digest}{_resource_suffix(current, content_type)}"
+                        if not target.exists():
+                            target.write_bytes(content)
+                        content_targets[digest] = target
+                    record: dict[str, object] = {
+                        "url": current,
+                        "source_page": current,
+                        "status": response.status_code,
+                        "path": str(target.relative_to(output)) if target is not None else None,
+                        "sha256": digest,
+                        "size": len(content),
+                        "content_type": content_type,
+                        "extraction_status": "downloaded" if selected else "skipped by resource selection",
+                    }
+                    record["resource_type"] = kind
+                    resource_records.append(record)
+                    if progress:
+                        progress({"stage": "resource", "current": current, "resource_type": kind, "downloaded_bytes": total_bytes})
+                    if kind == "json":
+                        counter = [0]
+                        try:
+                            body: object = sanitize(response.json(), counter)
+                        except (ValueError, TypeError):
+                            body = None
+                        api_observations.append({"method": "GET", "url": current, "path": urlsplit(current).path or "/", "status": response.status_code, "response_body": body, "source": "website", "source_page": current, "sanitized_values": counter[0]})
+                    pages.append(record)
+                    if "text/html" in response.headers.get("content-type", "") and depth < max_depth:
+                        parser = _Links()
+                        parser.feed(response.text)
+                        for href in parser.links:
+                            candidate = _normalize(urljoin(current, href))
+                            enqueue(candidate, depth + 1)
+                        for href, _tag in parser.resources:
+                            candidate = _normalize(urljoin(current, href))
+                            enqueue(candidate, depth)
+                except asyncio.CancelledError:
+                    queue.appendleft((current, depth))
+                    seen.discard(current)
+                    checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
+                    raise
+                except (httpx.HTTPError, UnicodeError, ValueError) as exc:
+                    pages.append({"url": current, "error": str(exc)})
+                    failed += 1
                 checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
-                raise
-            except (httpx.HTTPError, UnicodeError, ValueError) as exc:
-                pages.append({"url": current, "error": str(exc)})
-                failed += 1
-            checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
     report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(seen), "processed": len(pages), "skipped": skipped, "failed": failed, "pending": len(queue), "downloaded_bytes": total_bytes, "downloaded_resources": len(content_targets), "max_pages": max_pages, "max_depth": max_depth}
     (output / "extraction.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
@@ -462,7 +598,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
     return report
 
 
-async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> Workspace | None:
+async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> Workspace | None:
     if not yes:
         raise ValueError("interactive confirmation is required; pass --yes for automation")
     resource_types = parse_resource_selection(resource_types)
@@ -489,7 +625,7 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
         (output / "workspace").mkdir()
         (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
     if url:
-        report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, resume=resume, cancel_event=cancel_event, progress=progress, selected_pages=selected_pages)
+        report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, resume=resume, cancel_event=cancel_event, progress=progress, selected_pages=selected_pages)
         raw_api_observations = cast(list[object], report.get("api_observations", []))
         website_observations = [
             Observation(
