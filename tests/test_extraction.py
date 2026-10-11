@@ -26,7 +26,12 @@ def test_validate_url_rejects_local_destinations():
 
 
 def test_interactive_discovery_reports_optional_dependency(monkeypatch):
-    monkeypatch.setitem(__import__("sys").modules, "playwright", None)
+    import voai_ghostapi.interactive as interactive_module
+
+    def missing_browser(_name: str, _package: str | None = None):
+        raise ImportError("optional browser dependency unavailable")
+
+    monkeypatch.setattr(interactive_module.importlib.util, "find_spec", missing_browser)
     with pytest.raises(RuntimeError, match="optional 'browser'"):
         asyncio.run(discover_api_requests("https://example.test"))
 
@@ -298,6 +303,152 @@ def test_crawl_persists_pages_resources_and_json_observations(tmp_path, monkeypa
     assert (tmp_path / "website" / "extraction.json").exists()
 
 
+def test_crawl_downloads_html_css_javascript_and_images(tmp_path, monkeypatch):
+    """The website pipeline persists linked static resources alongside pages."""
+
+    class Response:
+        def __init__(self, url: str, content: bytes, content_type: str):
+            self.url = url
+            self.content = content
+            self.status_code = 200
+            self.headers = {"content-type": content_type}
+            self.text = content.decode("utf-8", "replace")
+
+        def json(self):
+            return json.loads(self.text)
+
+    responses = {
+        "https://example.test/robots.txt": Response("https://example.test/robots.txt", b"", "text/plain"),
+        "https://example.test/sitemap.xml": Response("https://example.test/sitemap.xml", b"<urlset />", "application/xml"),
+        "https://example.test/": Response(
+            "https://example.test/",
+            b'<link rel="stylesheet" href="/site.css"><script src="/app.js"></script><img src="/hero.png">',
+            "text/html",
+        ),
+        "https://example.test/site.css": Response("https://example.test/site.css", b"body{color:red}", "text/css"),
+        "https://example.test/app.js": Response("https://example.test/app.js", b"console.log('ok')", "text/javascript"),
+        "https://example.test/hero.png": Response("https://example.test/hero.png", b"PNG", "image/png"),
+    }
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            return responses[url]
+
+    monkeypatch.setattr(extract_module, "validate_url", lambda value: value)
+    monkeypatch.setattr(extract_module.httpx, "AsyncClient", Client)
+    report = asyncio.run(
+        extract_module.crawl(
+            "https://example.test/",
+            tmp_path / "website",
+            max_depth=0,
+            max_pages=4,
+            resource_types=frozenset({"all"}),
+        )
+    )
+    by_kind = {item["resource_type"]: item for item in report["resources"] if item["extraction_status"] == "downloaded"}
+    assert {"html", "css", "js", "images"}.issubset(by_kind)
+    for item in by_kind.values():
+        assert (tmp_path / "website" / str(item["path"])).is_file()
+
+
+def test_crawl_honors_single_page_limit_and_reports_page_categories(tmp_path, monkeypatch):
+    class Response:
+        def __init__(self, url: str, body: bytes):
+            self.url = url
+            self.content = body
+            self.status_code = 200
+            self.headers = {"content-type": "text/html"}
+            self.text = body.decode("utf-8")
+
+    responses = {
+        "https://example.test/robots.txt": Response("https://example.test/robots.txt", b""),
+        "https://example.test/sitemap.xml": Response("https://example.test/sitemap.xml", b"<urlset />"),
+        "https://example.test/": Response("https://example.test/", b'<a href="/second">second</a>'),
+        "https://example.test/second": Response("https://example.test/second", b"second"),
+    }
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            return responses[url]
+
+    monkeypatch.setattr(extract_module, "validate_url", lambda value: value)
+    monkeypatch.setattr(extract_module.httpx, "AsyncClient", Client)
+    events: list[dict[str, object]] = []
+    report = asyncio.run(
+        extract_module.crawl(
+            "https://example.test/",
+            tmp_path / "website",
+            max_depth=2,
+            max_pages=1,
+            progress=events.append,
+        )
+    )
+    assert report["processed"] == 1
+    assert report["successful_pages"] == ["https://example.test/"]
+    assert report["failed_pages"] == []
+    assert report["skipped_pages"] == []
+    assert report["pending"] == 1
+    assert events[-1]["stage"] == "complete"
+    assert events[-1]["pages_discovered"] == 2
+
+
+def test_crawl_follows_same_origin_redirect_and_rejects_cross_origin(tmp_path, monkeypatch):
+    class Response:
+        def __init__(self, url: str, status: int, body: bytes = b"", location: str | None = None):
+            self.url = url
+            self.content = body
+            self.status_code = status
+            self.headers = {"content-type": "text/html"}
+            if location:
+                self.headers["location"] = location
+            self.text = body.decode("utf-8")
+
+    responses = {
+        "https://example.test/robots.txt": Response("https://example.test/robots.txt", 404),
+        "https://example.test/sitemap.xml": Response("https://example.test/sitemap.xml", 404),
+        "https://example.test/": Response("https://example.test/", 302, location="/final"),
+        "https://example.test/final": Response("https://example.test/final", 200, b"<p>final</p>"),
+    }
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            return responses[url]
+
+    monkeypatch.setattr(extract_module, "validate_url", lambda value: value)
+    monkeypatch.setattr(extract_module.httpx, "AsyncClient", Client)
+    report = asyncio.run(extract_module.crawl("https://example.test/", tmp_path / "website"))
+    assert report["failed"] == 0
+    assert report["successful_pages"] == ["https://example.test/"]
+    assert report["pages"][0]["status"] == 200
+
+
 def test_crawl_selected_pages_does_not_follow_other_links(tmp_path, monkeypatch):
     class Response:
         def __init__(self, url: str, content: bytes, content_type: str):
@@ -447,6 +598,44 @@ def test_extract_har_writes_unified_workspace(tmp_path):
     workspace = asyncio.run(extract("", output, (capture,), yes=True))
     assert workspace is not None
     assert workspace.observations[0].source == "har"
+    assert (output / "workspace" / "workspace.json").exists()
+
+
+def test_extract_website_only_writes_report_without_har(tmp_path, monkeypatch):
+    async def fake_crawl(*_args, **_kwargs):
+        return {
+            "api_observations": [
+                {
+                    "method": "GET",
+                    "url": "https://example.test/items/1",
+                    "path": "/items/1",
+                    "status": 200,
+                    "response_body": {"id": 1},
+                    "source_page": "https://example.test/",
+                }
+            ],
+            "discovered": 1,
+            "completed": 1,
+            "successful_pages": ["https://example.test/"],
+            "failed_pages": [],
+            "skipped_pages": [],
+            "resources_downloaded": 2,
+            "downloaded_bytes": 64,
+            "warnings": [],
+            "coverage_limitations": [],
+            "cancelled": False,
+        }
+
+    monkeypatch.setattr(extract_module, "crawl", fake_crawl)
+    output = tmp_path / "website-only"
+    output.mkdir()
+    workspace = asyncio.run(extract_module.extract("https://example.test/", output, yes=True))
+    assert workspace is not None
+    assert workspace.observations[0].source == "website"
+    report = json.loads((output / "extraction-report.json").read_text(encoding="utf-8"))
+    assert report["mode"] == "website"
+    assert report["successful_pages"] == ["https://example.test/"]
+    assert report["resources_downloaded"] == 2
     assert (output / "workspace" / "workspace.json").exists()
 
 

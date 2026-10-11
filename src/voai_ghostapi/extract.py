@@ -765,8 +765,11 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                         if depth < max_depth:
                             for href in parser.links:
                                 enqueue(_normalize(urljoin(current, href)), depth + 1)
-                            for href, _tag in parser.resources:
-                                enqueue(_normalize(urljoin(current, href)), depth)
+                        # Resource references belong to the current page's
+                        # extraction scope and must still be downloaded when
+                        # crawling is intentionally limited to one page.
+                        for href, _tag in parser.resources:
+                            enqueue(_normalize(urljoin(current, href)), depth)
                 except asyncio.CancelledError:
                     queue.appendleft((current, depth))
                     seen.discard(current)

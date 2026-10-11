@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import importlib.util
 import json
 import re
 import time
@@ -158,9 +159,11 @@ async def discover_api_requests(
         )
 
     try:
+        if importlib.util.find_spec("playwright.async_api") is None:
+            raise ImportError("playwright is not installed")
         from playwright.async_api import Error as PlaywrightError  # type: ignore[import-not-found]
         from playwright.async_api import async_playwright  # type: ignore[import-not-found]
-    except ImportError as exc:
+    except (ImportError, ModuleNotFoundError, ValueError) as exc:
         raise RuntimeError("interactive discovery requires the optional 'browser' dependency") from exc
 
     if storage_state is not None and (not storage_state.is_file() or storage_state.is_symlink()):
