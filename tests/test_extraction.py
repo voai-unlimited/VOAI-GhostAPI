@@ -262,4 +262,38 @@ def test_crawl_persists_checkpoint_when_cancelled(tmp_path, monkeypatch):
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(extract_module.crawl("https://example.test/", tmp_path / "website"))
     checkpoint = json.loads((tmp_path / "website" / "checkpoint.json").read_text())
-    assert checkpoint["seen"] == ["https://example.test/"]
+    assert checkpoint["seen"] == []
+    assert checkpoint["queue"] == [["https://example.test/", 0]]
+
+
+def test_crawl_honors_cancel_event_and_reports_progress(tmp_path, monkeypatch):
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            raise AssertionError(f"network should not run after cancellation: {url}")
+
+    monkeypatch.setattr(extract_module, "validate_url", lambda value: value)
+    monkeypatch.setattr(extract_module.httpx, "AsyncClient", Client)
+    events: list[dict[str, object]] = []
+    cancel = asyncio.Event()
+    cancel.set()
+    report = asyncio.run(
+        extract_module.crawl(
+            "https://example.test/",
+            tmp_path / "website",
+            cancel_event=cancel,
+            progress=events.append,
+        )
+    )
+    assert report["processed"] == 0
+    assert events[-1]["stage"] == "complete"
+    checkpoint = json.loads((tmp_path / "website" / "checkpoint.json").read_text())
+    assert checkpoint["queue"] == [["https://example.test/", 0]]

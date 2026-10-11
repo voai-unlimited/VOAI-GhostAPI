@@ -2,6 +2,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import Any
 
 import typer
 import uvicorn
@@ -152,8 +153,15 @@ def extract(
         console.print("Extraction cancelled.")
         return
     try:
+        def show_progress(event: dict[str, Any]) -> None:
+            stage = event.get("stage")
+            if stage == "page":
+                console.print(f"Processing {event.get('current')} ({event.get('discovered', 0)} discovered)")
+            elif stage == "complete":
+                console.print(f"Extraction complete: {event.get('processed', 0)} pages, {event.get('failed', 0)} failed")
+
         workspace = __import__("asyncio").run(
-            extract_website(url or "", output, tuple(har), yes=True, max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, snapshot=snapshot, max_resource_bytes=max_resource_mb * 1024 * 1024, max_total_bytes=max_total_mb * 1024 * 1024, resume=resume)
+            extract_website(url or "", output, tuple(har), yes=True, max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, snapshot=snapshot, max_resource_bytes=max_resource_mb * 1024 * 1024, max_total_bytes=max_total_mb * 1024 * 1024, resume=resume, progress=show_progress)
         )
     except (OSError, ValueError) as exc:
         console.print(f"[red]Extraction error:[/red] {exc}")

@@ -11,9 +11,10 @@ import tempfile
 import urllib.robotparser
 import xml.etree.ElementTree as ET
 from collections import deque
+from collections.abc import Callable
 from html.parser import HTMLParser
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from urllib.parse import urldefrag, urljoin, urlsplit, urlunsplit
 
 import httpx
@@ -190,7 +191,7 @@ def _normalize(url: str) -> str:
     return urlunsplit((parts.scheme, parts.netloc, parts.path or "/", parts.query, ""))
 
 
-async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False) -> dict[str, object]:
+async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, object]:
     start = validate_url(url)
     origin = urlsplit(start).netloc.lower()
     if resume and output.exists() and not (output / "checkpoint.json").is_file():
@@ -215,7 +216,16 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
     selected_types = set(resource_types) & set(_RESOURCE_KINDS)
     if "images" in selected_types:
         selected_types.add("svg")
+    if cancel_event is not None and cancel_event.is_set():
+        report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": 0, "processed": 0, "skipped": 0, "failed": 0, "pending": len(queue), "downloaded_bytes": 0, "downloaded_resources": 0, "max_pages": max_pages, "max_depth": max_depth}
+        (output / "extraction.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+        checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
+        if progress:
+            progress({"stage": "complete", "processed": 0, "pending": len(queue), "failed": 0})
+        return report
     async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
+        if progress:
+            progress({"stage": "robots", "current": start})
         robots = urllib.robotparser.RobotFileParser()
         try:
             robots_response = await client.get(urljoin(start, "/robots.txt"))
@@ -223,6 +233,8 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
         except httpx.HTTPError:
             robots.parse([])
         try:
+            if progress:
+                progress({"stage": "sitemap", "current": start})
             sitemap = await client.get(urljoin(start, "/sitemap.xml"))
             if sitemap.status_code == 200 and "xml" in sitemap.headers.get("content-type", ""):
                 root = ET.fromstring(sitemap.text)
@@ -234,6 +246,9 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
         except (httpx.HTTPError, ET.ParseError, ValueError):
             pass
         while queue and len(seen) < max_pages:
+            if cancel_event is not None and cancel_event.is_set():
+                checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
+                break
             current, depth = queue.popleft()
             current = _normalize(current)
             if current in seen or urlsplit(current).netloc.lower() != origin:
@@ -243,6 +258,8 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                 skipped += 1
                 continue
             seen.add(current)
+            if progress:
+                progress({"stage": "page", "current": current, "discovered": len(seen), "pending": len(queue)})
             try:
                 response = None
                 for attempt in range(3):
@@ -286,6 +303,8 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                 }
                 record["resource_type"] = kind
                 resource_records.append(record)
+                if progress:
+                    progress({"stage": "resource", "current": current, "resource_type": kind, "downloaded_bytes": total_bytes})
                 if kind == "json":
                     counter = [0]
                     try:
@@ -306,6 +325,8 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                         if urlsplit(candidate).netloc.lower() == origin:
                             queue.append((candidate, depth))
             except asyncio.CancelledError:
+                queue.appendleft((current, depth))
+                seen.discard(current)
                 checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
                 raise
             except (httpx.HTTPError, UnicodeError, ValueError) as exc:
@@ -315,10 +336,12 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
     report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(seen), "processed": len(pages), "skipped": skipped, "failed": failed, "pending": len(queue), "downloaded_bytes": total_bytes, "downloaded_resources": len(content_targets), "max_pages": max_pages, "max_depth": max_depth}
     (output / "extraction.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
+    if progress:
+        progress({"stage": "complete", "processed": len(pages), "pending": len(queue), "failed": failed})
     return report
 
 
-async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False) -> Workspace | None:
+async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None) -> Workspace | None:
     if not yes:
         raise ValueError("interactive confirmation is required; pass --yes for automation")
     workspace: Workspace | None = None
@@ -343,7 +366,7 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
         (output / "workspace").mkdir()
         (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
     if url:
-        report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, resume=resume)
+        report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, resume=resume, cancel_event=cancel_event, progress=progress)
         raw_api_observations = cast(list[object], report.get("api_observations", []))
         website_observations = [
             Observation(
