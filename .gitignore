@@ -8,6 +8,7 @@ build/
 *.egg-info/
 workspace/
 generated/
+extracted/
 *.har
 
 # Local verification scratch directories
