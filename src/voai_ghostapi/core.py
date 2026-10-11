@@ -19,6 +19,8 @@ class Observation(BaseModel):
     status: int
     response_headers: dict[str, str] = Field(default_factory=dict)
     response_body: Any = None
+    source: str = "har"
+    source_page: str | None = None
 
 
 class Workspace(BaseModel):
@@ -294,6 +296,8 @@ def validate_workspace(workspace: Workspace) -> list[str]:
     if workspace.version != "1":
         errors.append("unsupported workspace version")
     for observation in workspace.observations:
+        if observation.source not in {"har", "website", "combined"}:
+            errors.append("invalid observation source")
         if observation.method not in ALLOWED_METHODS:
             errors.append("unsupported HTTP method")
         try:
@@ -356,4 +360,3 @@ def generate(workspace: Workspace, output: Path) -> None:
         "# Generated mock\n\nRun `uvicorn app:app --host 127.0.0.1 --port 8000`.\n",
         encoding="utf-8",
     )
-

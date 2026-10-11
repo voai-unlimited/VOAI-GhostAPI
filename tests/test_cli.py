@@ -44,6 +44,20 @@ def make_har(path: Path) -> None:
 def test_cli_help_and_version():
     assert runner.invoke(app, ["--help"]).exit_code == 0
     assert runner.invoke(app, ["--version"]).stdout.strip() == "0.1.0"
+    assert runner.invoke(app, ["extract", "--help"]).exit_code == 0
+    assert runner.invoke(app, ["wizard", "--help"]).exit_code == 0
+    assert runner.invoke(app, ["preview", "--help"]).exit_code == 0
+
+
+def test_preview_rejects_non_snapshot_directory(tmp_path):
+    result = runner.invoke(app, ["preview", str(tmp_path)])
+    assert result.exit_code != 0
+
+
+def test_extract_requires_an_input_source(tmp_path):
+    result = runner.invoke(app, ["extract", "--output", str(tmp_path / "out"), "--yes"])
+    assert result.exit_code != 0
+    assert result.exception is not None
 
 
 def test_cli_complete_workflow(tmp_path):
@@ -184,4 +198,3 @@ def test_clean_rejects_windows_junction(tmp_path):
     result = runner.invoke(app, ["clean", "--all", "--yes", "--root", str(junction)])
     assert result.exit_code == 1
     assert marker.exists()
-

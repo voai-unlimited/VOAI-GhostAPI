@@ -244,4 +244,3 @@ def test_generated_fastapi_route(tmp_path):
         and parameter["in"] == "path"
         and parameter["required"] is True
     )
-

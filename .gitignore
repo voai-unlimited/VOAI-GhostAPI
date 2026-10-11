@@ -10,3 +10,9 @@ workspace/
 generated/
 *.har
 
+# Local verification scratch directories
+*-temp/
+temp/
+tmpgen/
+.pytest-tmp/
+.venv-new/

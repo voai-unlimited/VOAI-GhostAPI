@@ -75,6 +75,38 @@ mock server before cleaning its generated directory.
 
 The import command expects a HAR file in the current project folder. For example, save an authorized browser capture as `capture.har`, then run the commands above. Open `http://127.0.0.1:8000/docs` to explore the generated mock.
 
+## Website and Combined Extraction
+
+The original HAR workflow remains network-free:
+
+```powershell
+voai-ghostapi import capture.har --output ./workspace
+```
+
+For bounded website extraction, use explicit confirmation or `--yes` for automation:
+
+```powershell
+voai-ghostapi extract --url https://example.com --scope page --resources html,css,js --yes
+voai-ghostapi extract --url https://example.com --scope site --max-pages 20 --max-depth 2 --snapshot --yes
+voai-ghostapi extract --url https://example.com --scope site --resume --yes
+voai-ghostapi extract --url https://example.com --har capture.har --output ./extracted --yes
+voai-ghostapi extract --url https://example.com --interactive --yes
+voai-ghostapi wizard
+```
+
+Website output is kept under `website/`; optional snapshots are under `snapshot/`.
+The crawler stays on the requested origin, blocks local and private destinations,
+and applies page, depth, per-resource, and total-download limits. `--interactive` is an optional browser-backed,
+read-only observation pass installed with `pip install .[browser]` and a Playwright browser runtime. It records
+observed JSON responses in `website/interactive.json`; it does not click controls or replay state-changing requests.
+Authentication flows and complete offline behavior are not inferred automatically.
+
+To preview a generated snapshot locally:
+
+```powershell
+voai-ghostapi preview ./extracted/snapshot --port 8001
+```
+
 ## CLI Commands
 
 `import` sanitizes a HAR into a workspace; `inspect` summarizes observations; `validate` checks its version and records; `generate` writes a runnable app; `serve` runs it on `127.0.0.1`.
@@ -97,7 +129,8 @@ HAR 1.2 JSON with textual request and response bodies. Binary, malformed, oversi
 
 ## Current Development Status
 
-Version 0.1.0 local implementation is complete and testable. GitHub publication is pending installation of Git and GitHub CLI authentication as `voai-unlimited`.
+The extraction upgrade is implemented as a local feature branch and is testable offline for HAR and HTTP workflows.
+The optional Playwright browser runtime and remote CI verification remain environment-dependent.
 
 ## Limitations
 

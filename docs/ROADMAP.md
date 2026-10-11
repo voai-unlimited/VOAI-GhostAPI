@@ -11,4 +11,3 @@ Next.js endpoint explorer and mock configuration UI.
 ## 0.4.0
 
 Optional Ollama integration and offline AI-assisted documentation.
-
