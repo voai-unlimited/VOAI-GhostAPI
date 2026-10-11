@@ -4,7 +4,11 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+import pytest
+
 from voai_ghostapi.interactive import discover_api_requests
+
+pytest.importorskip("playwright")
 
 
 class _FixtureHandler(BaseHTTPRequestHandler):
