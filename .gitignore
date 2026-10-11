@@ -15,4 +15,4 @@ generated/
 temp/
 tmpgen/
 .pytest-tmp/
-.venv-*/
+.venv*/
