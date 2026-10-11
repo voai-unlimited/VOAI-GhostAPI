@@ -7,6 +7,8 @@ generation. `extract.py` validates origins, follows only same-origin links, appl
 page/depth/byte limits, reads nested sitemap indexes, uses bounded breadth-first
 request batches with crawl-delay rate limiting, records resource metadata, writes
 resumable checkpoints, and merges optional HAR observations into one workspace.
+HTML parsing also captures inline CSS, JavaScript, and JSON-LD, while the optional
+browser observer persists bodies for dynamically loaded supported resources.
 `interactive.py` is an optional
 Playwright adapter for authorized, read-only recipes; it records observed JSON
 responses without replaying requests.

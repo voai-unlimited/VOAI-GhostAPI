@@ -13,7 +13,11 @@ from .cleanup import clean_artifacts, find_candidates
 from .core import generate as generate_app
 from .core import import_har, load_workspace, validate_workspace
 from .extract import extract as extract_website
-from .extract import parse_resource_selection, validate_har_inputs
+from .extract import (
+    parse_resource_selection,
+    persist_interactive_resources,
+    validate_har_inputs,
+)
 from .interactive import discover_api_requests
 
 app = typer.Typer(
@@ -134,6 +138,8 @@ def extract(
     max_depth: int = typer.Option(1, min=0, max=20),
     concurrency: int = typer.Option(4, min=1, max=32, help="Maximum concurrent page requests."),
     crawl_delay: float | None = typer.Option(None, min=0, max=60, help="Minimum seconds between requests."),
+    max_resources: int = typer.Option(1000, min=1, max=100000, help="Maximum downloaded resources."),
+    max_seconds: float | None = typer.Option(None, min=1, max=86400, help="Maximum website extraction time."),
     scope: str = typer.Option("page", help="Extraction scope: page, site, or selected."),
     pages: str = typer.Option("", "--pages", help="Comma-separated page URLs or paths for selected scope."),
     resources: str = typer.Option("html,css,js,images,json", help="Comma-separated resource types."),
@@ -180,7 +186,7 @@ def extract(
                 console.print(f"Extraction complete: {event.get('processed', 0)} pages, {event.get('failed', 0)} failed")
 
         workspace = __import__("asyncio").run(
-            extract_website(url or "", output, tuple(har), yes=True, max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, snapshot=snapshot, max_resource_bytes=max_resource_mb * 1024 * 1024, max_total_bytes=max_total_mb * 1024 * 1024, resume=resume, progress=show_progress, selected_pages=selected_pages)
+            extract_website(url or "", output, tuple(har), yes=True, max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, snapshot=snapshot, max_resource_bytes=max_resource_mb * 1024 * 1024, max_total_bytes=max_total_mb * 1024 * 1024, max_resources=max_resources, max_seconds=max_seconds, resume=resume, progress=show_progress, selected_pages=selected_pages)
         )
     except (OSError, ValueError) as exc:
         console.print(f"[red]Extraction error:[/red] {exc}")
@@ -211,11 +217,19 @@ def extract(
                 observations = __import__("asyncio").run(
                     discover_api_requests(url, storage_state=storage_state, interactions=recipes)
                 )
+                for observation in observations:
+                    observation.setdefault("source_page", url)
+                persisted = persist_interactive_resources(
+                    output / "website",
+                    observations,
+                    max_resource_bytes=max_resource_mb * 1024 * 1024,
+                    max_resources=max_resources,
+                )
             except (RuntimeError, OSError, ValueError) as exc:
                 console.print(f"[red]Interactive discovery unavailable:[/red] {exc}")
                 raise typer.Exit(code=1) from exc
             (output / "website" / "interactive.json").write_text(json.dumps(observations, indent=2), encoding="utf-8")
-            console.print(f"Interactive JSON responses observed: {len(observations)}")
+            console.print(f"Interactive resources observed: {len(observations)}; persisted: {len(persisted)}")
 
 
 @app.command()

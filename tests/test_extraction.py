@@ -11,6 +11,7 @@ from voai_ghostapi.extract import (
     build_snapshot,
     extract,
     parse_resource_selection,
+    persist_interactive_resources,
     validate_har_inputs,
     validate_url,
 )
@@ -92,6 +93,32 @@ def test_resource_kind_and_suffix_cover_non_api_assets():
     assert extract_module._resource_kind("application/pdf", "https://example.test/file") == "documents"
     assert extract_module._resource_kind("image/svg+xml", "https://example.test/icon") == "svg"
     assert extract_module._resource_suffix("https://example.test/file", "application/pdf") == ".pdf"
+    assert extract_module._resource_kind("application/manifest+json", "https://example.test/site.webmanifest") == "manifests"
+    assert extract_module._resource_kind("image/x-icon", "https://example.test/favicon.ico") == "icons"
+
+
+def test_link_parser_captures_inline_css_javascript_and_jsonld():
+    parser = _Links()
+    parser.feed('<style>.hero{color:red}</style><script>fetch("/api")</script><script type="application/ld+json">{"@type":"WebSite"}</script><div style="display:none"></div>')
+    assert ("css", ".hero{color:red}") in parser.inline
+    assert any(kind == "js" for kind, _body in parser.inline)
+    assert any(kind == "json" for kind, _body in parser.inline)
+    assert ("css", "display:none") in parser.inline
+
+
+def test_persist_interactive_resources_writes_hashed_bodies(tmp_path):
+    website = tmp_path / "website"
+    website.mkdir()
+    (website / "extraction.json").write_text('{"resources": []}', encoding="utf-8")
+    records = persist_interactive_resources(
+        website,
+        [{"url": "https://example.test/api.json", "status": 200, "content_type": "application/json", "body": '{"ok":true}'}],
+    )
+    assert len(records) == 1
+    assert records[0]["path"]
+    assert (website / str(records[0]["path"])).is_file()
+    report = json.loads((website / "extraction.json").read_text())
+    assert report["resources"][0]["resource_type"] == "json"
 
 
 def test_normalize_removes_fragments_and_preserves_query():
@@ -311,6 +338,85 @@ def test_crawl_selected_pages_does_not_follow_other_links(tmp_path, monkeypatch)
     )
     assert report["processed"] == 1
     assert all(item["url"] != "https://example.test/two" for item in report["pages"])
+
+
+def test_crawl_persists_inline_resources_at_page_scope(tmp_path, monkeypatch):
+    class Response:
+        def __init__(self, url: str, body: bytes, content_type: str):
+            self.url = url
+            self.content = body
+            self.status_code = 200
+            self.headers = {"content-type": content_type}
+            self.text = body.decode("utf-8")
+
+        def json(self):
+            return json.loads(self.text)
+
+    responses = {
+        "https://example.test/robots.txt": Response("https://example.test/robots.txt", b"", "text/plain"),
+        "https://example.test/sitemap.xml": Response("https://example.test/sitemap.xml", b"<urlset />", "application/xml"),
+        "https://example.test/": Response("https://example.test/", b'<style>body{color:red}</style><script>console.log("ok")</script><script type="application/ld+json">{"@type":"WebSite"}</script>', "text/html"),
+    }
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            return responses[url]
+
+    monkeypatch.setattr(extract_module, "validate_url", lambda value: value)
+    monkeypatch.setattr(extract_module.httpx, "AsyncClient", Client)
+    report = asyncio.run(extract_module.crawl("https://example.test/", tmp_path / "website", max_depth=0, resource_types=frozenset({"all"})))
+    inline = [item for item in report["resources"] if "#inline-" in str(item["url"])]
+    assert {item["resource_type"] for item in inline} == {"css", "js", "json"}
+    assert all(item["path"] for item in inline)
+
+
+def test_crawl_enforces_resource_count_limit(tmp_path, monkeypatch):
+    class Response:
+        def __init__(self, url: str, body: bytes, content_type: str):
+            self.url = url
+            self.content = body
+            self.status_code = 200
+            self.headers = {"content-type": content_type}
+            self.text = body.decode("utf-8", "replace")
+
+        def json(self):
+            return json.loads(self.text)
+
+    responses = {
+        "https://example.test/robots.txt": Response("https://example.test/robots.txt", b"", "text/plain"),
+        "https://example.test/sitemap.xml": Response("https://example.test/sitemap.xml", b"<urlset />", "application/xml"),
+        "https://example.test/": Response("https://example.test/", b"<a href='/one'>one</a><a href='/two'>two</a>", "text/html"),
+        "https://example.test/one": Response("https://example.test/one", b"one", "text/plain"),
+        "https://example.test/two": Response("https://example.test/two", b"two", "text/plain"),
+    }
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            return responses[url]
+
+    monkeypatch.setattr(extract_module, "validate_url", lambda value: value)
+    monkeypatch.setattr(extract_module.httpx, "AsyncClient", Client)
+    report = asyncio.run(extract_module.crawl("https://example.test/", tmp_path / "website", max_depth=1, max_pages=3, max_resources=1, resource_types=frozenset({"all"})))
+    assert report["downloaded_resources"] == 1
+    assert any(item["extraction_status"] == "skipped by resource limit" for item in report["resources"])
 
 
 def test_extract_har_writes_unified_workspace(tmp_path):

@@ -112,11 +112,15 @@ Read-only recipes in a JSON array support `click`, `fill`, `select`, and bounded
 or state-changing actions are rejected.
 
 Resource selection accepts `html`, `css`, `js`, `images`, `svg`, `fonts`, `json`,
-`video`, `audio`, `documents`, and `all`. Every fetched resource is recorded in
+`manifests`, `icons`, `video`, `audio`, `documents`, and `all`. External and inline
+CSS, JavaScript, and JSON-LD are recorded when their resource class is selected.
+Every fetched resource is recorded in
 `website/extraction.json` with its URL, source page, MIME type, status, size, SHA-256
 checksum, and local path when it was selected for download. Identical content is
 stored once by checksum. Snapshot rewriting covers HTML attributes, CSS `url(...)`,
 and JavaScript `fetch(...)`/`import(...)` references when the target was downloaded.
+Use `--max-resource-mb`, `--max-total-mb`, `--max-resources`, and `--max-seconds`
+to bound individual files, aggregate bytes, resource count, and extraction time.
 Use `clear` to explicitly select no downloadable website resources. HAR inputs are
 prevalidated before confirmation and persistent workspace creation. Combined runs
 keep website resources under `website/` and mark exact duplicate observations from

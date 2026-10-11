@@ -1,15 +1,19 @@
-"""Optional, read-only browser discovery for dynamically loaded API calls."""
+"""Optional, read-only browser discovery for dynamically loaded resources."""
 
 from __future__ import annotations
 
+import base64
+import hashlib
 from pathlib import Path
 from typing import Any
+
+from .core import sanitize
 
 _SAFE_ACTIONS = frozenset({"click", "fill", "select", "scroll"})
 _MAX_INTERACTIONS = 50
 
 
-async def discover_api_requests(url: str, *, storage_state: Path | None = None, timeout_ms: int = 30_000, interactions: list[dict[str, Any]] | None = None) -> list[dict[str, Any]]:
+async def discover_api_requests(url: str, *, storage_state: Path | None = None, timeout_ms: int = 30_000, interactions: list[dict[str, Any]] | None = None, max_body_bytes: int = 5 * 1024 * 1024) -> list[dict[str, Any]]:
     """Observe network responses during a page load when Playwright is installed.
 
     This intentionally performs navigation only. It does not click controls or
@@ -17,6 +21,8 @@ async def discover_api_requests(url: str, *, storage_state: Path | None = None, 
     """
     if interactions is not None and len(interactions) > _MAX_INTERACTIONS:
         raise ValueError(f"at most {_MAX_INTERACTIONS} interactive actions are permitted")
+    if max_body_bytes < 1:
+        raise ValueError("max_body_bytes must be positive")
     prepared: list[tuple[str, str | None, str, str, int, float]] = []
     for index, recipe in enumerate(interactions or [], start=1):
         action = recipe.get("action")
@@ -34,6 +40,7 @@ async def discover_api_requests(url: str, *, storage_state: Path | None = None, 
         prepared.append((str(action), selector if isinstance(selector, str) else None, str(recipe.get("name") or f"{action}-{index}"), str(recipe.get("value", "")), repeat, distance))
 
     try:
+        from playwright.async_api import Error as PlaywrightError  # type: ignore[import-not-found]
         from playwright.async_api import async_playwright  # type: ignore[import-not-found]
     except ImportError as exc:
         raise RuntimeError("interactive discovery requires the optional 'browser' dependency") from exc
@@ -51,9 +58,32 @@ async def discover_api_requests(url: str, *, storage_state: Path | None = None, 
 
             async def record(response: Any) -> None:
                 content_type = response.headers.get("content-type", "")
-                if "json" not in content_type.lower():
+                lowered = content_type.lower()
+                supported = (
+                    "json" in lowered
+                    or lowered.startswith(("text/css", "text/javascript", "application/javascript", "image/", "font/", "video/", "audio/"))
+                    or lowered in {"application/pdf", "application/manifest+json"}
+                )
+                if not supported:
                     return
-                item: dict[str, Any] = {"method": response.request.method, "url": response.url, "status": response.status, "content_type": content_type}
+                sanitized_count = [0]
+                item: dict[str, Any] = {"method": response.request.method, "url": sanitize(response.url, sanitized_count), "status": response.status, "content_type": content_type}
+                try:
+                    body = await response.body()
+                except (OSError, PlaywrightError, RuntimeError, ValueError):
+                    body = b""
+                if len(body) <= max_body_bytes:
+                    item["size"] = len(body)
+                    item["sha256"] = hashlib.sha256(body).hexdigest()
+                    if "text/" in lowered or "json" in lowered or "javascript" in lowered or "css" in lowered:
+                        item["body"] = sanitize(body.decode("utf-8", "replace"), sanitized_count)
+                    else:
+                        item["body_base64"] = base64.b64encode(body).decode("ascii")
+                    if sanitized_count[0]:
+                        item["sanitized_values"] = sanitized_count[0]
+                else:
+                    item["size"] = len(body)
+                    item["extraction_status"] = "skipped by resource size limit"
                 if active_interaction is not None:
                     item["triggering_interaction"] = active_interaction
                 observations.append(item)

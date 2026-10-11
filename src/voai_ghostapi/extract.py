@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import ipaddress
 import json
@@ -37,6 +38,10 @@ class _Links(HTMLParser):
         super().__init__()
         self.links: list[str] = []
         self.resources: list[tuple[str, str]] = []
+        self.inline: list[tuple[str, str]] = []
+        self._inline_tag: str | None = None
+        self._inline_kind: str | None = None
+        self._inline_data: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = dict(attrs)
@@ -52,10 +57,30 @@ class _Links(HTMLParser):
                 reference = candidate.strip().split(None, 1)[0]
                 if reference:
                     self.resources.append((reference, tag))
+        if values.get("style"):
+            self.inline.append(("css", values["style"] or ""))
+        if tag in {"style", "script"} and not values.get("src"):
+            self._inline_tag = tag
+            self._inline_data = []
+            script_type = (values.get("type") or "").lower()
+            self._inline_kind = "json" if "json" in script_type else "css" if tag == "style" else "js"
+
+    def handle_data(self, data: str) -> None:
+        if self._inline_tag is not None:
+            self._inline_data.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if self._inline_tag == tag and self._inline_kind is not None:
+            content = "".join(self._inline_data)
+            if content.strip():
+                self.inline.append((self._inline_kind, content))
+            self._inline_tag = None
+            self._inline_kind = None
+            self._inline_data = []
 
 
 _RESOURCE_KINDS = frozenset(
-    {"html", "css", "js", "images", "svg", "fonts", "json", "video", "audio", "documents", "other"}
+    {"html", "css", "js", "images", "svg", "fonts", "json", "manifests", "icons", "video", "audio", "documents", "other"}
 )
 
 _RESOURCE_ALIASES = {
@@ -68,6 +93,10 @@ _RESOURCE_ALIASES = {
     "structured-data": "json",
     "video-and-audio": "video",
     "documents-and-downloads": "documents",
+    "manifest": "manifests",
+    "manifests": "manifests",
+    "icon": "icons",
+    "icons": "icons",
 }
 
 
@@ -147,10 +176,14 @@ def _resource_kind(content_type: str, url: str) -> str:
         return "css"
     if "javascript" in mime or mime in {"application/ecmascript", "text/ecmascript"} or suffix in {".js", ".mjs", ".cjs"}:
         return "js"
+    if mime in {"application/manifest+json", "application/x-web-app-manifest+json"} or suffix in {".webmanifest", ".manifest"}:
+        return "manifests"
     if mime == "application/json" or mime.endswith("+json") or suffix in {".json", ".map"}:
         return "json"
     if mime == "image/svg+xml" or suffix == ".svg":
         return "svg"
+    if mime in {"image/x-icon", "image/vnd.microsoft.icon"} or suffix == ".ico":
+        return "icons"
     if mime.startswith("image/"):
         return "images"
     if mime.startswith("font/") or suffix in {".woff", ".woff2", ".ttf", ".otf", ".eot"}:
@@ -175,7 +208,9 @@ def _resource_suffix(url: str, content_type: str) -> str:
         "application/javascript": ".js",
         "text/javascript": ".js",
         "application/json": ".json",
+        "application/manifest+json": ".webmanifest",
         "image/svg+xml": ".svg",
+        "image/x-icon": ".ico",
         "application/pdf": ".pdf",
     }.get(mime, ".bin")
 
@@ -267,6 +302,72 @@ def build_snapshot(website_dir: Path, snapshot_dir: Path) -> dict[str, object]:
     report = {"files": copied, "mapping": mapping, "limitations": ["dynamic behavior and backend APIs remain online-dependent"]}
     (snapshot_dir / "snapshot.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
+
+
+def persist_interactive_resources(
+    website_dir: Path,
+    observations: list[dict[str, Any]],
+    *,
+    max_resource_bytes: int = 5 * 1024 * 1024,
+    max_resources: int = 1000,
+) -> list[dict[str, object]]:
+    """Persist bodies captured by the optional browser network observer."""
+    report_path = website_dir / "extraction.json"
+    if not report_path.is_file():
+        return []
+    report = json.loads(report_path.read_text(encoding="utf-8"))
+    resource_records = report.setdefault("resources", [])
+    resources = website_dir / "resources"
+    resources.mkdir(exist_ok=True)
+    known = {
+        str(item.get("sha256")): item
+        for item in resource_records
+        if isinstance(item, dict) and item.get("path")
+    }
+    added: list[dict[str, object]] = []
+    for observation in observations:
+        try:
+            if "body" in observation:
+                body = str(observation["body"]).encode("utf-8")
+            elif observation.get("body_base64"):
+                body = base64.b64decode(str(observation["body_base64"]), validate=True)
+            else:
+                continue
+            url = str(observation.get("url", ""))
+            content_type = str(observation.get("content_type", ""))
+            digest = hashlib.sha256(body).hexdigest()
+            kind = _resource_kind(content_type, url)
+            record: dict[str, object] = {
+                "url": url,
+                "source_page": str(observation.get("source_page") or url),
+                "status": int(observation.get("status", 200)),
+                "path": None,
+                "sha256": digest,
+                "size": len(body),
+                "content_type": content_type,
+                "resource_type": kind,
+                "extraction_status": "downloaded",
+            }
+            if len(body) > max_resource_bytes:
+                record["extraction_status"] = "skipped by resource size limit"
+            elif digest in known:
+                record["path"] = known[digest].get("path")
+            elif len(known) >= max_resources:
+                record["extraction_status"] = "skipped by resource limit"
+            else:
+                target = resources / f"{digest}{_resource_suffix(url, content_type)}"
+                if not target.exists():
+                    target.write_bytes(body)
+                record["path"] = str(target.relative_to(website_dir))
+                added.append(record)
+                known[digest] = record
+            resource_records.append(record)
+        except (ValueError, TypeError, OSError):
+            continue
+    report["resources"] = resource_records
+    report["downloaded_resources"] = len(known)
+    (website_dir / "extraction.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+    return added
 
 
 def validate_url(url: str) -> str:
@@ -399,9 +500,13 @@ async def _read_sitemap_urls(
     return pages
 
 
-async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> dict[str, object]:
+async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, max_resources: int = 1000, max_seconds: float | None = None, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> dict[str, object]:
     if not 1 <= concurrency <= 32:
         raise ValueError("concurrency must be between 1 and 32")
+    if max_resources < 1:
+        raise ValueError("max_resources must be positive")
+    if max_seconds is not None and max_seconds <= 0:
+        raise ValueError("max_seconds must be positive")
     resource_types = parse_resource_selection(resource_types)
     start = validate_url(url)
     origin = urlsplit(start).netloc.lower()
@@ -443,17 +548,20 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
         base = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", "", ""))
         query_variants.setdefault(base, set()).add(initial_url)
     pages: list[dict[str, object]] = []
+    started_at = time.monotonic()
     total_bytes = 0
     skipped = 0
     failed = 0
     api_observations: list[dict[str, object]] = []
     resource_records: list[dict[str, object]] = []
     content_targets: dict[str, Path] = {}
+    downloaded_resource_count = 0
+    timed_out = False
     selected_types = set(resource_types) & set(_RESOURCE_KINDS)
     if "images" in selected_types:
         selected_types.add("svg")
     if cancel_event is not None and cancel_event.is_set():
-        report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": 0, "processed": 0, "skipped": 0, "failed": 0, "pending": len(queue), "downloaded_bytes": 0, "downloaded_resources": 0, "max_pages": max_pages, "max_depth": max_depth}
+        report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": 0, "processed": 0, "skipped": 0, "failed": 0, "pending": len(queue), "downloaded_bytes": 0, "downloaded_resources": 0, "max_resources": max_resources, "max_seconds": max_seconds, "timed_out": False, "max_pages": max_pages, "max_depth": max_depth}
         (output / "extraction.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
         if progress:
@@ -489,6 +597,9 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
             pass
         semaphore = asyncio.Semaphore(concurrency)
         while queue and len(seen) < max_pages:
+            if max_seconds is not None and time.monotonic() - started_at >= max_seconds:
+                timed_out = True
+                break
             if cancel_event is not None and cancel_event.is_set():
                 checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
                 break
@@ -545,11 +656,16 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                     kind = _resource_kind(content_type, current)
                     selected = "all" in resource_types or kind in selected_types
                     target = content_targets.get(digest)
+                    resource_limited = False
                     if selected and target is None:
-                        target = resources / f"{digest}{_resource_suffix(current, content_type)}"
-                        if not target.exists():
-                            target.write_bytes(content)
-                        content_targets[digest] = target
+                        if downloaded_resource_count >= max_resources:
+                            resource_limited = True
+                        else:
+                            target = resources / f"{digest}{_resource_suffix(current, content_type)}"
+                            if not target.exists():
+                                target.write_bytes(content)
+                            content_targets[digest] = target
+                            downloaded_resource_count += 1
                     record: dict[str, object] = {
                         "url": current,
                         "source_page": current,
@@ -558,7 +674,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                         "sha256": digest,
                         "size": len(content),
                         "content_type": content_type,
-                        "extraction_status": "downloaded" if selected else "skipped by resource selection",
+                        "extraction_status": "skipped by resource limit" if resource_limited else "downloaded" if selected else "skipped by resource selection",
                     }
                     record["resource_type"] = kind
                     resource_records.append(record)
@@ -572,15 +688,41 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                             body = None
                         api_observations.append({"method": "GET", "url": current, "path": urlsplit(current).path or "/", "status": response.status_code, "response_body": body, "source": "website", "source_page": current, "sanitized_values": counter[0]})
                     pages.append(record)
-                    if "text/html" in response.headers.get("content-type", "") and depth < max_depth:
+                    if "text/html" in response.headers.get("content-type", ""):
                         parser = _Links()
                         parser.feed(response.text)
-                        for href in parser.links:
-                            candidate = _normalize(urljoin(current, href))
-                            enqueue(candidate, depth + 1)
-                        for href, _tag in parser.resources:
-                            candidate = _normalize(urljoin(current, href))
-                            enqueue(candidate, depth)
+                        for inline_index, (inline_kind, inline_text) in enumerate(parser.inline):
+                            inline_bytes = inline_text.encode("utf-8")
+                            inline_url = f"{current}#inline-{inline_index}"
+                            inline_digest = hashlib.sha256(inline_bytes).hexdigest()
+                            inline_selected = "all" in resource_types or inline_kind in selected_types
+                            inline_target = content_targets.get(inline_digest)
+                            inline_limited = False
+                            if inline_selected and inline_target is None:
+                                if len(inline_bytes) > max_resource_bytes or downloaded_resource_count >= max_resources:
+                                    inline_limited = True
+                                else:
+                                    inline_target = resources / f"{inline_digest}{_resource_suffix(f'inline.{inline_kind}', f'text/{inline_kind}')}"
+                                    if not inline_target.exists():
+                                        inline_target.write_bytes(inline_bytes)
+                                    content_targets[inline_digest] = inline_target
+                                    downloaded_resource_count += 1
+                            resource_records.append({
+                                "url": inline_url,
+                                "source_page": current,
+                                "status": response.status_code,
+                                "path": str(inline_target.relative_to(output)) if inline_target is not None else None,
+                                "sha256": inline_digest,
+                                "size": len(inline_bytes),
+                                "content_type": f"text/{inline_kind}",
+                                "extraction_status": "skipped by resource limit" if inline_limited else "downloaded" if inline_selected else "skipped by resource selection",
+                                "resource_type": inline_kind,
+                            })
+                        if depth < max_depth:
+                            for href in parser.links:
+                                enqueue(_normalize(urljoin(current, href)), depth + 1)
+                            for href, _tag in parser.resources:
+                                enqueue(_normalize(urljoin(current, href)), depth)
                 except asyncio.CancelledError:
                     queue.appendleft((current, depth))
                     seen.discard(current)
@@ -590,7 +732,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                     pages.append({"url": current, "error": str(exc)})
                     failed += 1
                 checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
-    report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(seen), "processed": len(pages), "skipped": skipped, "failed": failed, "pending": len(queue), "downloaded_bytes": total_bytes, "downloaded_resources": len(content_targets), "max_pages": max_pages, "max_depth": max_depth}
+    report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(seen), "processed": len(pages), "skipped": skipped, "failed": failed, "pending": len(queue), "downloaded_bytes": total_bytes, "downloaded_resources": len(content_targets), "max_resources": max_resources, "max_seconds": max_seconds, "timed_out": timed_out, "max_pages": max_pages, "max_depth": max_depth}
     (output / "extraction.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
     if progress:
@@ -598,7 +740,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
     return report
 
 
-async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> Workspace | None:
+async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, max_resources: int = 1000, max_seconds: float | None = None, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> Workspace | None:
     if not yes:
         raise ValueError("interactive confirmation is required; pass --yes for automation")
     resource_types = parse_resource_selection(resource_types)
@@ -625,7 +767,7 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
         (output / "workspace").mkdir()
         (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
     if url:
-        report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, resume=resume, cancel_event=cancel_event, progress=progress, selected_pages=selected_pages)
+        report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, max_resources=max_resources, max_seconds=max_seconds, resume=resume, cancel_event=cancel_event, progress=progress, selected_pages=selected_pages)
         raw_api_observations = cast(list[object], report.get("api_observations", []))
         website_observations = [
             Observation(

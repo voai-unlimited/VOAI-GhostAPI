@@ -9,7 +9,7 @@ voai-ghostapi extract --har capture.har --output extracted --yes
 voai-ghostapi extract --url URL --har capture.har --snapshot --yes
 ```
 
-Repeat `--har` for multiple captures. `--scope page|site|selected`, `--pages` (for selected scope), `--max-pages`, `--max-depth`, `--concurrency`, `--crawl-delay`, `--resources`, and the byte
+Repeat `--har` for multiple captures. `--scope page|site|selected`, `--pages` (for selected scope), `--max-pages`, `--max-depth`, `--concurrency`, `--crawl-delay`, `--max-resources`, `--max-seconds`, `--resources`, and the byte
 limits bound crawling. `--resume` consumes a checkpoint after cancellation. Add
 `--interactive --storage-state state.json --interactions interactions.json` to run
 authorized read-only Playwright recipes. `preview SNAPSHOT` serves an offline copy
