@@ -38,20 +38,56 @@ Python 3.11+.
 python -m pip install .
 ```
 
-For a Windows development checkout, create and activate a virtual environment:
+For a Windows development checkout in PowerShell, create and activate a virtual
+environment with the Windows activation script:
 
 ```powershell
 cd path\to\VOAI-GhostAPI
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+python -m venv .venv-new
+.\.venv-new\Scripts\Activate.ps1
+# Verify that both Python and pip come from this environment.
+python -c "import sys; print(sys.executable)"
+python -m pip --version
 python -m pip install -e ".[dev]"
 voai-ghostapi --help
 voai-ghostapi --version
 ```
 
+In Bash (including Git Bash on Windows), use the Bash activation script. On
+Linux and macOS, the virtual environment uses `bin` instead of `Scripts`:
+
+```bash
+cd /path/to/VOAI-GhostAPI
+python -m venv .venv-new
+# Git Bash on Windows:
+. .venv-new/Scripts/activate
+# Linux or macOS (use this instead of the line above):
+# . .venv-new/bin/activate
+# Verify that the active interpreter is the new environment before continuing.
+python -c 'import sys; print(sys.executable)'
+python -m pip --version
+python -m pip install -e '.[dev]'
+voai-ghostapi --help
+voai-ghostapi --version
+```
+
+The verification commands should show a path containing `.venv-new`. If they
+show a system Python, activate the environment again before installing or
+running the CLI.
+
 ## Quick Start
 
 ```powershell
+voai-ghostapi import capture.har --output ./workspace
+voai-ghostapi inspect ./workspace
+voai-ghostapi validate ./workspace
+voai-ghostapi generate ./workspace --output ./generated
+voai-ghostapi serve ./generated --port 8000
+```
+
+The same HAR workflow in Bash is:
+
+```bash
 voai-ghostapi import capture.har --output ./workspace
 voai-ghostapi inspect ./workspace
 voai-ghostapi validate ./workspace
@@ -146,6 +182,14 @@ Equivalent observations are deduplicated, distinct status or response variants
 are retained, and provenance is recorded as `har`, `website`, or `both`.
 Website resources remain under `website/`; API observations are persisted under
 `workspace/` and can be sent to the normal `generate` command.
+
+All one-line commands in this section work in either shell. For a multiline
+command, PowerShell uses a backtick while Bash uses a trailing backslash:
+
+```bash
+voai-ghostapi extract --url https://example.com --har capture.har \
+  --scope site --max-pages 20 --max-depth 2 --output ./extracted --yes
+```
 
 ## Crawling, resources, and limits
 
