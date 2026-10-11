@@ -10,6 +10,8 @@ from voai_ghostapi.extract import (
     _normalize,
     build_snapshot,
     extract,
+    parse_resource_selection,
+    validate_har_inputs,
     validate_url,
 )
 from voai_ghostapi.interactive import discover_api_requests
@@ -228,6 +230,43 @@ def test_extract_combines_har_and_website_observations(tmp_path, monkeypatch):
     assert {item.source for item in workspace.observations} == {"har", "website"}
     assert len(workspace.observations) == 2
     assert (tmp_path / "combined" / "workspace" / "workspace.json").exists()
+
+
+def test_combined_duplicate_observation_records_both_sources(tmp_path, monkeypatch):
+    capture = tmp_path / "capture.har"
+    capture.write_text(
+        json.dumps({"log": {"entries": [{"request": {"method": "GET", "url": "https://example.test/items/1"}, "response": {"status": 200, "headers": [{"name": "Content-Type", "value": "application/json"}], "content": {"text": '{"id":1}'}}}]}}),
+        encoding="utf-8",
+    )
+
+    async def fake_crawl(*_args, **_kwargs):
+        return {"api_observations": [{"method": "GET", "url": "https://example.test/items/1", "path": "/items/1", "status": 200, "response_body": {"id": 1}, "source_page": "https://example.test/"}]}
+
+    monkeypatch.setattr(extract_module, "crawl", fake_crawl)
+    workspace = asyncio.run(extract_module.extract("https://example.test/", tmp_path / "combined", (capture,), yes=True))
+    assert workspace is not None
+    assert len(workspace.observations) == 1
+    assert workspace.observations[0].source == "both"
+
+
+def test_resource_selection_supports_all_clear_aliases_and_rejects_unknown():
+    assert parse_resource_selection("all") == frozenset({"all"})
+    assert parse_resource_selection("clear") == frozenset()
+    assert "json" in parse_resource_selection("api")
+    with pytest.raises(ValueError, match="unsupported resource"):
+        parse_resource_selection("does-not-exist")
+
+
+def test_har_inputs_are_prevalidated_without_writing_workspace(tmp_path):
+    capture = tmp_path / "capture.har"
+    capture.write_text('{"log":{"entries":[]}}', encoding="utf-8")
+    result = validate_har_inputs([capture])
+    assert result == [{"path": str(capture), "entries": 0, "valid": True}]
+    assert not (tmp_path / "workspace").exists()
+    bad = tmp_path / "bad.har"
+    bad.write_text("not-json", encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid HAR"):
+        validate_har_inputs([bad])
 
 
 def test_crawl_honors_robots_and_retries_transient_failures(tmp_path, monkeypatch):

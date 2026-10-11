@@ -60,6 +60,39 @@ def test_extract_requires_an_input_source(tmp_path):
     assert result.exception is not None
 
 
+def test_extract_preflights_har_before_confirmation(tmp_path):
+    bad = tmp_path / "bad.har"
+    bad.write_text("not-json", encoding="utf-8")
+    result = runner.invoke(
+        app,
+        ["extract", "--har", str(bad), "--output", str(tmp_path / "out")],
+        input="n\n",
+    )
+    assert result.exit_code != 0
+    assert "invalid HAR" in result.output
+    assert "Start extraction" not in result.output
+
+
+def test_extract_resource_selection_rejects_unknown_value(tmp_path):
+    capture = tmp_path / "capture.har"
+    make_har(capture)
+    result = runner.invoke(
+        app,
+        [
+            "extract",
+            "--har",
+            str(capture),
+            "--resources",
+            "unknown",
+            "--output",
+            str(tmp_path / "out"),
+            "--yes",
+        ],
+    )
+    assert result.exit_code != 0
+    assert "unsupported resource" in result.output
+
+
 def test_cli_complete_workflow(tmp_path):
     capture = tmp_path / "capture.har"
     make_har(capture)

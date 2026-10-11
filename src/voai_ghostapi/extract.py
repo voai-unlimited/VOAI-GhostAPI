@@ -57,6 +57,85 @@ _RESOURCE_KINDS = frozenset(
     {"html", "css", "js", "images", "svg", "fonts", "json", "video", "audio", "documents", "other"}
 )
 
+_RESOURCE_ALIASES = {
+    "api": "json",
+    "apis": "json",
+    "javascript": "js",
+    "image": "images",
+    "images-and-svg": "images",
+    "font": "fonts",
+    "structured-data": "json",
+    "video-and-audio": "video",
+    "documents-and-downloads": "documents",
+}
+
+
+def parse_resource_selection(value: str | frozenset[str]) -> frozenset[str]:
+    """Validate and normalize a resource selection from the CLI or wizard."""
+    if isinstance(value, frozenset):
+        raw = set(value)
+    else:
+        raw = {item.strip().lower() for item in value.split(",") if item.strip()}
+    if not raw or raw <= {"clear", "none"}:
+        return frozenset()
+    if "all" in raw or "select-all" in raw:
+        if len(raw - {"all", "select-all"}) > 0:
+            raise ValueError("all cannot be combined with individual resources")
+        return frozenset({"all"})
+    normalized = {_RESOURCE_ALIASES.get(item, item) for item in raw}
+    unknown = normalized - _RESOURCE_KINDS
+    if unknown:
+        raise ValueError(f"unsupported resource type(s): {', '.join(sorted(unknown))}")
+    return frozenset(normalized)
+
+
+def validate_har_inputs(har_files: tuple[Path, ...] | list[Path]) -> list[dict[str, object]]:
+    """Validate HAR containers before any persistent workspace is created."""
+    results: list[dict[str, object]] = []
+    for source in har_files:
+        try:
+            if source.is_symlink() or not source.is_file():
+                raise ValueError("HAR path must be a regular file")
+            if source.stat().st_size > 25 * 1024 * 1024:
+                raise ValueError("HAR exceeds 25 MiB limit")
+            payload = json.loads(source.read_text(encoding="utf-8"))
+            log = payload.get("log")
+            entries = log.get("entries") if isinstance(log, dict) else None
+            if not isinstance(entries, list):
+                raise TypeError("HAR log.entries must be a list")
+            results.append({"path": str(source), "entries": len(entries), "valid": True})
+        except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(f"invalid HAR {source}: {exc}") from exc
+    return results
+
+
+def _observation_key(observation: Observation) -> tuple[str, str, int, str]:
+    return (
+        observation.method,
+        observation.path,
+        observation.status,
+        json.dumps(observation.response_body, sort_keys=True, default=str),
+    )
+
+
+def _merge_observations(observations: list[Observation]) -> list[Observation]:
+    """Deduplicate exact observations and retain both-source provenance."""
+    merged: dict[tuple[str, str, int, str], Observation] = {}
+    for observation in observations:
+        key = _observation_key(observation)
+        previous = merged.get(key)
+        if previous is None:
+            merged[key] = observation
+            continue
+        if previous.source != observation.source:
+            previous.source = "both"
+        if previous.source_page is None:
+            previous.source_page = observation.source_page
+    return sorted(
+        merged.values(),
+        key=lambda item: (item.method, item.path, item.status, item.source),
+    )
+
 
 def _resource_kind(content_type: str, url: str) -> str:
     mime = content_type.split(";", 1)[0].strip().lower()
@@ -242,6 +321,7 @@ async def _get_with_safe_redirects(client: httpx.AsyncClient, url: str, origin: 
 
 
 async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> dict[str, object]:
+    resource_types = parse_resource_selection(resource_types)
     start = validate_url(url)
     origin = urlsplit(start).netloc.lower()
     if resume and output.exists() and not (output / "checkpoint.json").is_file():
@@ -385,8 +465,10 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
 async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> Workspace | None:
     if not yes:
         raise ValueError("interactive confirmation is required; pass --yes for automation")
+    resource_types = parse_resource_selection(resource_types)
     workspace: Workspace | None = None
     if har_files:
+        validate_har_inputs(har_files)
         _safe_output(output)
         with tempfile.TemporaryDirectory(prefix="voai-har-") as temp:
             imported = [import_har(har, Path(temp) / str(index)) for index, har in enumerate(har_files)]
@@ -426,11 +508,7 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
             if workspace is None:
                 workspace = Workspace()
             workspace.observations.extend(website_observations)
-            unique: dict[tuple[str, str, int, str], Observation] = {}
-            for observation in workspace.observations:
-                key = (observation.method, observation.path, observation.status, json.dumps(observation.response_body, sort_keys=True, default=str))
-                unique.setdefault(key, observation)
-            workspace.observations = sorted(unique.values(), key=lambda item: (item.method, item.path, item.status, item.source))
+            workspace.observations = _merge_observations(workspace.observations)
             grouped_website: dict[str, list[object]] = {}
             for observation in workspace.observations:
                 if observation.response_body is not None:

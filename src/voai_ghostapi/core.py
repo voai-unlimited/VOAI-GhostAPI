@@ -305,7 +305,7 @@ def validate_workspace(workspace: Workspace) -> list[str]:
     if workspace.version != "1":
         errors.append("unsupported workspace version")
     for observation in workspace.observations:
-        if observation.source not in {"har", "website", "combined"}:
+        if observation.source not in {"har", "website", "both", "combined"}:
             errors.append("invalid observation source")
         if observation.method not in ALLOWED_METHODS:
             errors.append("unsupported HTTP method")

@@ -115,6 +115,10 @@ Resource selection accepts `html`, `css`, `js`, `images`, `svg`, `fonts`, `json`
 checksum, and local path when it was selected for download. Identical content is
 stored once by checksum. Snapshot rewriting covers HTML attributes, CSS `url(...)`,
 and JavaScript `fetch(...)`/`import(...)` references when the target was downloaded.
+Use `clear` to explicitly select no downloadable website resources. HAR inputs are
+prevalidated before confirmation and persistent workspace creation. Combined runs
+keep website resources under `website/` and mark exact duplicate observations from
+both pipelines with source `both`.
 
 To preview a generated snapshot locally:
 

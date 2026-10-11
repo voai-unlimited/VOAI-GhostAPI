@@ -13,6 +13,7 @@ from .cleanup import clean_artifacts, find_candidates
 from .core import generate as generate_app
 from .core import import_har, load_workspace, validate_workspace
 from .extract import extract as extract_website
+from .extract import parse_resource_selection, validate_har_inputs
 from .interactive import discover_api_requests
 
 app = typer.Typer(
@@ -131,7 +132,7 @@ def extract(
     yes: bool = typer.Option(False, "--yes"),
     max_pages: int = typer.Option(20, min=1, max=1000),
     max_depth: int = typer.Option(1, min=0, max=20),
-    scope: str = typer.Option("site", help="Extraction scope: page, site, or selected."),
+    scope: str = typer.Option("page", help="Extraction scope: page, site, or selected."),
     pages: str = typer.Option("", "--pages", help="Comma-separated page URLs or paths for selected scope."),
     resources: str = typer.Option("html,css,js,images,json", help="Comma-separated resource types."),
     snapshot: bool = typer.Option(False, "--snapshot", help="Generate a local website snapshot."),
@@ -154,7 +155,17 @@ def extract(
         raise typer.BadParameter("--pages is required for selected scope")
     if scope != "selected" and selected_pages:
         raise typer.BadParameter("--pages is only valid with --scope selected")
-    resource_types = frozenset(item.strip().lower() for item in resources.split(",") if item.strip())
+    try:
+        resource_types = parse_resource_selection(resources)
+        har_summary = validate_har_inputs(har) if har else []
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    mode = "combined" if url and har else "website" if url else "har"
+    console.print(
+        f"Mode: {mode}; scope: {scope}; resources: "
+        f"{', '.join(sorted(resource_types)) if resource_types else 'none'}; "
+        f"HAR files: {len(har_summary)}; output: {output}"
+    )
     if not yes and not typer.confirm("Start extraction with the selected inputs?", default=False):
         console.print("Extraction cancelled.")
         return
@@ -216,6 +227,10 @@ def wizard():
     if mode in {"har", "combined"}:
         raw = typer.prompt("HAR files (comma-separated paths)")
         har_values = [Path(item.strip()) for item in raw.split(",") if item.strip()]
+        try:
+            validate_har_inputs(har_values)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     scope = "page"
     selected_pages = ""
     resources = "html,css,js,images,json"
@@ -223,7 +238,14 @@ def wizard():
         scope = typer.prompt("Scope (page, site, or selected)", default="page").lower()
         if scope == "selected":
             selected_pages = typer.prompt("Selected pages (comma-separated paths)")
-        resources = typer.prompt("Resources (comma-separated)", default=resources)
+        resources = typer.prompt(
+            "Resources (comma-separated, 'all' to Select All, 'clear' to Clear Selection)",
+            default=resources,
+        )
+        try:
+            parse_resource_selection(resources)
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     output = Path(typer.prompt("Output directory", default="extracted"))
     confirmed = typer.confirm(f"Extract {mode} data into {output}?", default=False)
     if not confirmed:
