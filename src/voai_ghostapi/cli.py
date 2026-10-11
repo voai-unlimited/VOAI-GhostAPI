@@ -2,11 +2,13 @@ import json
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 import typer
 import uvicorn
 from rich.console import Console
+from rich.live import Live
+from rich.table import Table
 
 from . import __version__
 from .cleanup import clean_artifacts, find_candidates
@@ -25,6 +27,49 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 console = Console()
+
+
+class ExtractionDashboard:
+    """Render structured crawler events without inventing a completion percentage."""
+
+    def __init__(self, mode: str) -> None:
+        self.mode = mode
+        self.state: dict[str, Any] = {"stage": "starting", "mode": mode}
+        self.live: Live | None = None
+
+    def __enter__(self) -> Self:
+        self.live = Live(self.render(), console=console, refresh_per_second=8, transient=False)
+        self.live.start()
+        return self
+
+    def __exit__(self, *_args: object) -> None:
+        if self.live is not None:
+            self.live.update(self.render(), refresh=True)
+            self.live.stop()
+
+    def update(self, event: dict[str, Any]) -> None:
+        self.state.update(event)
+        if self.live is not None:
+            self.live.update(self.render())
+
+    def render(self) -> Table:
+        table = Table(title="VOAI-GhostAPI extraction", show_header=False)
+        table.add_column("Metric", style="cyan")
+        table.add_column("Value", overflow="fold")
+        values = [
+            ("Mode", self.state.get("mode", self.mode)),
+            ("Stage", self.state.get("stage", "starting")),
+            ("Current page", self.state.get("current") or "-"),
+            ("Pages", f"{self.state.get('pages_completed', 0)} completed / {self.state.get('pages_discovered', 0)} discovered"),
+            ("Skipped / failed", f"{self.state.get('pages_skipped', 0)} / {self.state.get('pages_failed', 0)}"),
+            ("Resources downloaded", self.state.get("resources_downloaded", 0)),
+            ("Unique APIs", self.state.get("unique_apis_discovered", 0)),
+            ("Downloaded", f"{self.state.get('downloaded_bytes', 0)} bytes"),
+            ("Elapsed", f"{self.state.get('elapsed_seconds', 0):.1f}s"),
+        ]
+        for label, value in values:
+            table.add_row(label, str(value))
+        return table
 
 
 @app.callback()
@@ -146,6 +191,8 @@ def extract(
     snapshot: bool = typer.Option(False, "--snapshot", help="Generate a local website snapshot."),
     max_resource_mb: int = typer.Option(5, min=1, max=100),
     max_total_mb: int = typer.Option(50, min=1, max=1000),
+    large_site_threshold: int = typer.Option(50, "--large-site-threshold", min=1, max=1000, help="Page count that triggers the large-site warning."),
+    confirm_large: bool = typer.Option(False, "--confirm-large", help="Confirm extraction above the large-site threshold."),
     resume: bool = typer.Option(False, "--resume", help="Resume from the website checkpoint."),
     interactive: bool = typer.Option(False, "--interactive", help="Observe JSON API requests during a read-only browser load."),
     storage_state: Path | None = typer.Option(None, "--storage-state", help="Authorized Playwright storage-state JSON file."),  # noqa: B008
@@ -179,20 +226,33 @@ def extract(
         f"{', '.join(sorted(resource_types)) if resource_types else 'none'}; "
         f"HAR files: {len(har_summary)}; output: {output}"
     )
+    large_site = bool(url and (max_pages >= large_site_threshold or max_depth >= 3 or max_total_mb >= 500))
+    if large_site:
+        console.print(
+            "[yellow]Large extraction warning:[/yellow] this run may take significant time, "
+            "consume disk space, and encounter inaccessible resources."
+        )
+        if not confirm_large:
+            if yes:
+                raise typer.BadParameter("--confirm-large is required for extraction above configured thresholds")
+            if not typer.confirm("Continue with the large extraction?", default=False):
+                console.print("Extraction cancelled.")
+                return
     if not yes and not typer.confirm("Start extraction with the selected inputs?", default=False):
         console.print("Extraction cancelled.")
         return
     try:
-        def show_progress(event: dict[str, Any]) -> None:
-            stage = event.get("stage")
-            if stage == "page":
-                console.print(f"Processing {event.get('current')} ({event.get('discovered', 0)} discovered)")
-            elif stage == "complete":
-                console.print(f"Extraction complete: {event.get('processed', 0)} pages, {event.get('failed', 0)} failed")
+        dashboard = ExtractionDashboard(mode)
+        with dashboard:
+            def show_progress(event: dict[str, Any]) -> None:
+                dashboard.update({**event, "mode": mode})
 
-        workspace = __import__("asyncio").run(
-            extract_website(url or "", output, tuple(har), yes=True, max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, snapshot=snapshot, max_resource_bytes=max_resource_mb * 1024 * 1024, max_total_bytes=max_total_mb * 1024 * 1024, max_resources=max_resources, max_seconds=max_seconds, resume=resume, progress=show_progress, selected_pages=selected_pages)
-        )
+            workspace = __import__("asyncio").run(
+                extract_website(url or "", output, tuple(har), yes=True, max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, snapshot=snapshot, max_resource_bytes=max_resource_mb * 1024 * 1024, max_total_bytes=max_total_mb * 1024 * 1024, max_resources=max_resources, max_seconds=max_seconds, resume=resume, progress=show_progress, selected_pages=selected_pages)
+            )
+    except KeyboardInterrupt as exc:
+        console.print("[yellow]Extraction cancelled.[/yellow] Checkpoint data was retained where available.")
+        raise typer.Exit(code=130) from exc
     except (OSError, ValueError) as exc:
         console.print(f"[red]Extraction error:[/red] {exc}")
         raise typer.Exit(code=1) from exc
@@ -210,6 +270,14 @@ def extract(
                 f"skipped: {report.get('skipped', 0)}; "
                 f"failed: {report.get('failed', 0)}; "
                 f"downloaded: {report.get('downloaded_bytes', 0)} bytes"
+            )
+        final_report_path = output / "extraction-report.json"
+        if final_report_path.is_file():
+            final_report = json.loads(final_report_path.read_text(encoding="utf-8"))
+            console.print(
+                f"Final report: {final_report_path}; successful pages: {len(final_report.get('successful_pages', []))}; "
+                f"failed: {len(final_report.get('failed_pages', []))}; skipped: {len(final_report.get('skipped_pages', []))}; "
+                f"unique APIs: {len(final_report.get('discovered_apis', []))}"
             )
         if snapshot:
             snapshot_report = output / "snapshot" / "snapshot.json"

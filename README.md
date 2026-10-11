@@ -129,6 +129,12 @@ stored once by checksum. Snapshot rewriting covers HTML attributes, CSS `url(...
 and JavaScript `fetch(...)`/`import(...)` references when the target was downloaded.
 Use `--max-resource-mb`, `--max-total-mb`, `--max-resources`, and `--max-seconds`
 to bound individual files, aggregate bytes, resource count, and extraction time.
+Website extraction displays a live Rich dashboard with mode, stage, page/resource/API
+counters, bytes, and elapsed time without presenting an invented percentage. Each run
+writes `extraction-report.json` with successful, failed, and skipped pages, API totals,
+download size, warnings, and coverage limitations. Press Ctrl+C to retain the checkpoint
+and resume with `--resume`. Large runs show a time/disk/access warning; automated runs
+above the configured threshold must include `--confirm-large`.
 Use `clear` to explicitly select no downloadable website resources. HAR inputs are
 prevalidated before confirmation and persistent workspace creation. Combined runs
 keep website resources under `website/` and mark exact duplicate observations from

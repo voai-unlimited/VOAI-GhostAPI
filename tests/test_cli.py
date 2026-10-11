@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from voai_ghostapi.cli import app
+from voai_ghostapi.cli import ExtractionDashboard, app
 
 runner = CliRunner()
 
@@ -47,6 +47,28 @@ def test_cli_help_and_version():
     assert runner.invoke(app, ["extract", "--help"]).exit_code == 0
     assert runner.invoke(app, ["wizard", "--help"]).exit_code == 0
     assert runner.invoke(app, ["preview", "--help"]).exit_code == 0
+
+
+def test_extraction_dashboard_reports_counters_without_percentage():
+    dashboard = ExtractionDashboard("website")
+    dashboard.update(
+        {
+            "stage": "page",
+            "current": "https://example.test/",
+            "pages_discovered": 4,
+            "pages_completed": 1,
+            "pages_skipped": 1,
+            "pages_failed": 0,
+            "resources_downloaded": 2,
+            "unique_apis_discovered": 3,
+            "downloaded_bytes": 1024,
+            "elapsed_seconds": 1.5,
+        }
+    )
+    rendered = dashboard.render()
+    assert dashboard.state["pages_discovered"] == 4
+    assert dashboard.state["pages_completed"] == 1
+    assert rendered.title == "VOAI-GhostAPI extraction"
 
 
 def test_preview_rejects_non_snapshot_directory(tmp_path):
@@ -105,6 +127,26 @@ def test_extract_resource_selection_rejects_unknown_value(tmp_path):
     )
     assert result.exit_code != 0
     assert "unsupported resource" in result.output
+
+
+def test_extract_writes_final_report_for_har_mode(tmp_path):
+    capture = tmp_path / "capture.har"
+    make_har(capture)
+    output = tmp_path / "extracted"
+    result = runner.invoke(app, ["extract", "--har", str(capture), "--output", str(output), "--yes"])
+    assert result.exit_code == 0
+    report = json.loads((output / "extraction-report.json").read_text(encoding="utf-8"))
+    assert report["mode"] == "har"
+    assert report["discovered_apis"] == ["GET /items/{param}"]
+
+
+def test_large_extract_requires_explicit_threshold_confirmation(tmp_path):
+    result = runner.invoke(
+        app,
+        ["extract", "--url", "https://example.test", "--scope", "site", "--max-pages", "50", "--yes", "--output", str(tmp_path / "out")],
+    )
+    assert result.exit_code != 0
+    assert "confirm-large" in result.output
 
 
 def test_cli_complete_workflow(tmp_path):

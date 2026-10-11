@@ -27,6 +27,7 @@ from .core import (
     _safe_output,
     build_inventory,
     import_har,
+    route_path,
     sanitize,
 )
 
@@ -590,17 +591,33 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
     selected_types = set(resource_types) & set(_RESOURCE_KINDS)
     if "images" in selected_types:
         selected_types.add("svg")
+    def emit(stage: str, current: str | None = None) -> None:
+        if progress:
+            event: dict[str, Any] = {
+                "stage": stage,
+                "mode": "website",
+                "current": current,
+                "pages_discovered": len(scheduled),
+                "pages_completed": len(pages),
+                "pages_skipped": skipped,
+                "pages_failed": failed,
+                "resources_downloaded": downloaded_resource_count,
+                "unique_apis_discovered": len({(str(item.get("method")), route_path(str(item.get("path", "/")))) for item in api_observations}),
+                "downloaded_bytes": total_bytes,
+                "elapsed_seconds": round(time.monotonic() - started_at, 3),
+                "pending": len(queue),
+            }
+            progress(event)
+
     if cancel_event is not None and cancel_event.is_set():
-        report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": 0, "processed": 0, "skipped": 0, "failed": 0, "pending": len(queue), "downloaded_bytes": 0, "downloaded_resources": 0, "max_resources": max_resources, "max_seconds": max_seconds, "timed_out": False, "max_pages": max_pages, "max_depth": max_depth}
+        report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(scheduled), "processed": 0, "completed": 0, "successful_pages": [], "failed_pages": [], "skipped_pages": [], "skipped": 0, "failed": 0, "pending": len(queue), "downloaded_bytes": 0, "downloaded_resources": 0, "resources_downloaded": 0, "unique_apis_discovered": 0, "max_resources": max_resources, "max_seconds": max_seconds, "timed_out": False, "cancelled": True, "max_pages": max_pages, "max_depth": max_depth, "warnings": ["Extraction cancelled before the first page was processed."], "coverage_limitations": ["No pages were processed."]}
         (output / "extraction.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
-        if progress:
-            progress({"stage": "complete", "processed": 0, "pending": len(queue), "failed": 0})
+        emit("complete")
         return report
     async with httpx.AsyncClient(follow_redirects=False, timeout=timeout) as client:
         rate_limiter = _RateLimiter(crawl_delay or 0.0)
-        if progress:
-            progress({"stage": "robots", "current": start})
+        emit("robots", start)
         robots = urllib.robotparser.RobotFileParser()
         try:
             robots_response = await _get_with_safe_redirects(
@@ -617,8 +634,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
             except (TypeError, ValueError):
                 pass
         try:
-            if progress:
-                progress({"stage": "sitemap", "current": start})
+            emit("sitemap", start)
             for sitemap_page in await _read_sitemap_urls(
                 client, start, origin, rate_limiter=rate_limiter
             ):
@@ -648,8 +664,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
             if not batch:
                 continue
             for current, _depth in batch:
-                if progress:
-                    progress({"stage": "page", "current": current, "discovered": len(seen), "pending": len(queue)})
+                emit("page", current)
 
             async def fetch_page(item: tuple[str, int]) -> httpx.Response:
                 async with semaphore:
@@ -708,8 +723,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                     }
                     record["resource_type"] = kind
                     resource_records.append(record)
-                    if progress:
-                        progress({"stage": "resource", "current": current, "resource_type": kind, "downloaded_bytes": total_bytes})
+                    emit("resource", current)
                     if kind == "json":
                         counter = [0]
                         try:
@@ -762,11 +776,25 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                     pages.append({"url": current, "error": str(exc)})
                     failed += 1
                 checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
-    report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(seen), "processed": len(pages), "skipped": skipped, "failed": failed, "pending": len(queue), "downloaded_bytes": total_bytes, "downloaded_resources": len(content_targets), "max_resources": max_resources, "max_seconds": max_seconds, "timed_out": timed_out, "max_pages": max_pages, "max_depth": max_depth}
+    successful_pages = [item["url"] for item in pages if "error" not in item and "skipped" not in item]
+    failed_pages = [item["url"] for item in pages if "error" in item]
+    skipped_pages = [item["url"] for item in pages if "skipped" in item]
+    unique_apis = sorted({f"{item.get('method')} {route_path(str(item.get('path', '/')))}" for item in api_observations})
+    warnings: list[str] = []
+    limitations: list[str] = []
+    if timed_out:
+        warnings.append("The configured extraction time limit was reached.")
+        limitations.append("Pages still pending at the time limit were not processed.")
+    if cancel_event is not None and cancel_event.is_set():
+        limitations.append("Extraction was cancelled; resume from checkpoint to continue.")
+    if queue:
+        limitations.append(f"{len(queue)} discovered pages remain pending.")
+    if any("skipped" in item for item in resource_records):
+        warnings.append("Some resources were skipped by selection or configured limits.")
+    report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(scheduled), "processed": len(pages), "completed": len(pages), "successful_pages": successful_pages, "failed_pages": failed_pages, "skipped_pages": skipped_pages, "skipped": skipped, "failed": failed, "pending": len(queue), "downloaded_bytes": total_bytes, "downloaded_resources": len(content_targets), "resources_downloaded": downloaded_resource_count, "unique_apis_discovered": len(unique_apis), "discovered_apis": unique_apis, "max_resources": max_resources, "max_seconds": max_seconds, "timed_out": timed_out, "cancelled": bool(cancel_event and cancel_event.is_set()), "max_pages": max_pages, "max_depth": max_depth, "warnings": warnings, "coverage_limitations": limitations}
     (output / "extraction.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
-    if progress:
-        progress({"stage": "complete", "processed": len(pages), "pending": len(queue), "failed": failed})
+    emit("complete")
     return report
 
 
@@ -775,6 +803,7 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
         raise ValueError("interactive confirmation is required; pass --yes for automation")
     resource_types = parse_resource_selection(resource_types)
     workspace: Workspace | None = None
+    website_report: dict[str, object] | None = None
     if har_files:
         validate_har_inputs(har_files)
         _safe_output(output)
@@ -796,8 +825,8 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
         (output / "workspace").mkdir()
         (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
     if url:
-        report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, max_resources=max_resources, max_seconds=max_seconds, resume=resume, cancel_event=cancel_event, progress=progress, selected_pages=selected_pages)
-        raw_api_observations = cast(list[object], report.get("api_observations", []))
+        website_report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, max_resources=max_resources, max_seconds=max_seconds, resume=resume, cancel_event=cancel_event, progress=progress, selected_pages=selected_pages)
+        raw_api_observations = cast(list[object], website_report.get("api_observations", []))
         website_observations = [
             Observation(
                 method=str(item["method"]),
@@ -822,4 +851,22 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
             (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
         if snapshot:
             build_snapshot(output / "website", output / "snapshot")
+    mode = "combined" if url and har_files else "website" if url else "har"
+    inventory_observations = workspace.observations if workspace else []
+    discovered_apis = sorted({f"{item.method} {route_path(item.path)}" for item in inventory_observations})
+    final_report = {
+        "mode": mode,
+        "successful_pages": website_report.get("successful_pages", []) if website_report else [],
+        "failed_pages": website_report.get("failed_pages", []) if website_report else [],
+        "skipped_pages": website_report.get("skipped_pages", []) if website_report else [],
+        "pages_discovered": website_report.get("discovered", 0) if website_report else 0,
+        "pages_completed": website_report.get("completed", 0) if website_report else 0,
+        "resources_downloaded": website_report.get("resources_downloaded", 0) if website_report else 0,
+        "downloaded_bytes": website_report.get("downloaded_bytes", 0) if website_report else 0,
+        "discovered_apis": discovered_apis,
+        "warnings": website_report.get("warnings", []) if website_report else list(workspace.warnings) if workspace else [],
+        "coverage_limitations": website_report.get("coverage_limitations", []) if website_report else ["HAR inventory reflects captured traffic only."],
+        "cancelled": website_report.get("cancelled", False) if website_report else False,
+    }
+    (output / "extraction-report.json").write_text(json.dumps(final_report, indent=2), encoding="utf-8")
     return workspace
