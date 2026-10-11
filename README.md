@@ -89,6 +89,7 @@ For bounded website extraction, use explicit confirmation or `--yes` for automat
 voai-ghostapi extract --url https://example.com --scope page --resources html,css,js --yes
 voai-ghostapi extract --url https://example.com --scope page --resources html,css,js,images,svg,fonts,json,video,audio,documents --yes
 voai-ghostapi extract --url https://example.com --scope page --resources all --snapshot --yes
+voai-ghostapi extract --url https://example.com --scope selected --pages /docs,/pricing --yes
 voai-ghostapi extract --url https://example.com --scope site --max-pages 20 --max-depth 2 --snapshot --yes
 voai-ghostapi extract --url https://example.com --scope site --resume --yes
 voai-ghostapi extract --url https://example.com --har capture.har --output ./extracted --yes

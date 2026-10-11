@@ -131,7 +131,8 @@ def extract(
     yes: bool = typer.Option(False, "--yes"),
     max_pages: int = typer.Option(20, min=1, max=1000),
     max_depth: int = typer.Option(1, min=0, max=20),
-    scope: str = typer.Option("site", help="Extraction scope: page or site."),
+    scope: str = typer.Option("site", help="Extraction scope: page, site, or selected."),
+    pages: str = typer.Option("", "--pages", help="Comma-separated page URLs or paths for selected scope."),
     resources: str = typer.Option("html,css,js,images,json", help="Comma-separated resource types."),
     snapshot: bool = typer.Option(False, "--snapshot", help="Generate a local website snapshot."),
     max_resource_mb: int = typer.Option(5, min=1, max=100),
@@ -144,10 +145,15 @@ def extract(
     """Extract a website, HAR files, or both into separate output areas."""
     if not url and not har:
         raise typer.BadParameter("provide --url, --har, or both")
-    if scope not in {"page", "site"}:
-        raise typer.BadParameter("scope must be page or site")
+    if scope not in {"page", "site", "selected"}:
+        raise typer.BadParameter("scope must be page, site, or selected")
     if scope == "page":
         max_pages, max_depth = 1, 0
+    selected_pages = tuple(item.strip() for item in pages.split(",") if item.strip())
+    if scope == "selected" and not selected_pages:
+        raise typer.BadParameter("--pages is required for selected scope")
+    if scope != "selected" and selected_pages:
+        raise typer.BadParameter("--pages is only valid with --scope selected")
     resource_types = frozenset(item.strip().lower() for item in resources.split(",") if item.strip())
     if not yes and not typer.confirm("Start extraction with the selected inputs?", default=False):
         console.print("Extraction cancelled.")
@@ -161,7 +167,7 @@ def extract(
                 console.print(f"Extraction complete: {event.get('processed', 0)} pages, {event.get('failed', 0)} failed")
 
         workspace = __import__("asyncio").run(
-            extract_website(url or "", output, tuple(har), yes=True, max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, snapshot=snapshot, max_resource_bytes=max_resource_mb * 1024 * 1024, max_total_bytes=max_total_mb * 1024 * 1024, resume=resume, progress=show_progress)
+            extract_website(url or "", output, tuple(har), yes=True, max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, snapshot=snapshot, max_resource_bytes=max_resource_mb * 1024 * 1024, max_total_bytes=max_total_mb * 1024 * 1024, resume=resume, progress=show_progress, selected_pages=selected_pages)
         )
     except (OSError, ValueError) as exc:
         console.print(f"[red]Extraction error:[/red] {exc}")
@@ -211,9 +217,12 @@ def wizard():
         raw = typer.prompt("HAR files (comma-separated paths)")
         har_values = [Path(item.strip()) for item in raw.split(",") if item.strip()]
     scope = "page"
+    selected_pages = ""
     resources = "html,css,js,images,json"
     if url:
-        scope = typer.prompt("Scope (page or site)", default="page").lower()
+        scope = typer.prompt("Scope (page, site, or selected)", default="page").lower()
+        if scope == "selected":
+            selected_pages = typer.prompt("Selected pages (comma-separated paths)")
         resources = typer.prompt("Resources (comma-separated)", default=resources)
     output = Path(typer.prompt("Output directory", default="extracted"))
     confirmed = typer.confirm(f"Extract {mode} data into {output}?", default=False)
@@ -226,6 +235,7 @@ def wizard():
         output=output,
         yes=True,
         scope=scope,
+        pages=selected_pages,
         resources=resources,
         snapshot=typer.confirm("Generate an offline snapshot?", default=False) if url else False,
     )

@@ -241,7 +241,7 @@ async def _get_with_safe_redirects(client: httpx.AsyncClient, url: str, origin: 
     raise httpx.HTTPError("too many redirects")
 
 
-async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, object]:
+async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> dict[str, object]:
     start = validate_url(url)
     origin = urlsplit(start).netloc.lower()
     if resume and output.exists() and not (output / "checkpoint.json").is_file():
@@ -250,7 +250,10 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
     resources = output / "resources"
     resources.mkdir(exist_ok=True)
     checkpoint = output / "checkpoint.json"
-    queue: deque[tuple[str, int]] = deque([(start, 0)])
+    allowed_pages = {_normalize(urljoin(start, item)) for item in selected_pages}
+    if any(urlsplit(item).netloc.lower() != origin for item in allowed_pages):
+        raise ValueError("selected pages must stay on the requested origin")
+    queue: deque[tuple[str, int]] = deque((item, 0) for item in sorted(allowed_pages)) if allowed_pages else deque([(start, 0)])
     seen: set[str] = set()
     if resume and checkpoint.exists():
         saved = json.loads(checkpoint.read_text(encoding="utf-8"))
@@ -301,7 +304,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                 break
             current, depth = queue.popleft()
             current = _normalize(current)
-            if current in seen or urlsplit(current).netloc.lower() != origin:
+            if current in seen or urlsplit(current).netloc.lower() != origin or (allowed_pages and current not in allowed_pages):
                 skipped += 1
                 continue
             if not robots.can_fetch("VOAI-GhostAPI", current):
@@ -356,11 +359,11 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                     parser.feed(response.text)
                     for href in parser.links:
                         candidate = _normalize(urljoin(current, href))
-                        if urlsplit(candidate).netloc.lower() == origin:
+                        if urlsplit(candidate).netloc.lower() == origin and (not allowed_pages or candidate in allowed_pages):
                             queue.append((candidate, depth + 1))
                     for href, _tag in parser.resources:
                         candidate = _normalize(urljoin(current, href))
-                        if urlsplit(candidate).netloc.lower() == origin:
+                        if urlsplit(candidate).netloc.lower() == origin and (not allowed_pages or candidate in allowed_pages):
                             queue.append((candidate, depth))
             except asyncio.CancelledError:
                 queue.appendleft((current, depth))
@@ -379,7 +382,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
     return report
 
 
-async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None) -> Workspace | None:
+async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> Workspace | None:
     if not yes:
         raise ValueError("interactive confirmation is required; pass --yes for automation")
     workspace: Workspace | None = None
@@ -404,7 +407,7 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
         (output / "workspace").mkdir()
         (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
     if url:
-        report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, resume=resume, cancel_event=cancel_event, progress=progress)
+        report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, resume=resume, cancel_event=cancel_event, progress=progress, selected_pages=selected_pages)
         raw_api_observations = cast(list[object], report.get("api_observations", []))
         website_observations = [
             Observation(

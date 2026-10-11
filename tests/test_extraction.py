@@ -139,6 +139,51 @@ def test_crawl_persists_pages_resources_and_json_observations(tmp_path, monkeypa
     assert (tmp_path / "website" / "extraction.json").exists()
 
 
+def test_crawl_selected_pages_does_not_follow_other_links(tmp_path, monkeypatch):
+    class Response:
+        def __init__(self, url: str, content: bytes, content_type: str):
+            self.url = url
+            self.content = content
+            self.status_code = 200
+            self.headers = {"content-type": content_type}
+            self.text = content.decode("utf-8", "replace")
+
+        def json(self):
+            return json.loads(self.text)
+
+    responses = {
+        "https://example.test/robots.txt": Response("https://example.test/robots.txt", b"", "text/plain"),
+        "https://example.test/sitemap.xml": Response("https://example.test/sitemap.xml", b"<urlset />", "application/xml"),
+        "https://example.test/one": Response("https://example.test/one", b'<a href="/two">two</a>', "text/html"),
+        "https://example.test/two": Response("https://example.test/two", b"two", "text/plain"),
+    }
+
+    class Client:
+        def __init__(self, **_kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args):
+            return None
+
+        async def get(self, url: str):
+            return responses[url]
+
+    monkeypatch.setattr(extract_module, "validate_url", lambda value: value)
+    monkeypatch.setattr(extract_module.httpx, "AsyncClient", Client)
+    report = asyncio.run(
+        extract_module.crawl(
+            "https://example.test/one",
+            tmp_path / "website",
+            selected_pages=("/one",),
+        )
+    )
+    assert report["processed"] == 1
+    assert all(item["url"] != "https://example.test/two" for item in report["pages"])
+
+
 def test_extract_har_writes_unified_workspace(tmp_path):
     capture = tmp_path / "capture.har"
     capture.write_text(
