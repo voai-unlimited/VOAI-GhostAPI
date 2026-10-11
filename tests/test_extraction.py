@@ -78,8 +78,17 @@ def test_link_parser_collects_navigation_and_resource_attributes():
         '<script src="/app.js"></script><img src="/hero.png">'
         '<video poster="/poster.jpg"></video>'
     )
-    assert parser.links == ["/items", "/site.css"]
-    assert parser.resources == [("/app.js", "script"), ("/hero.png", "img"), ("/poster.jpg", "video")]
+    assert parser.links == ["/items"]
+    assert parser.resources == [("/site.css", "link"), ("/app.js", "script"), ("/hero.png", "img"), ("/poster.jpg", "video")]
+
+
+def test_resource_kind_and_suffix_cover_non_api_assets():
+    assert extract_module._resource_kind("font/woff2", "https://example.test/font") == "fonts"
+    assert extract_module._resource_kind("video/mp4", "https://example.test/movie") == "video"
+    assert extract_module._resource_kind("audio/ogg", "https://example.test/sound") == "audio"
+    assert extract_module._resource_kind("application/pdf", "https://example.test/file") == "documents"
+    assert extract_module._resource_kind("image/svg+xml", "https://example.test/icon") == "svg"
+    assert extract_module._resource_suffix("https://example.test/file", "application/pdf") == ".pdf"
 
 
 def test_normalize_removes_fragments_and_preserves_query():

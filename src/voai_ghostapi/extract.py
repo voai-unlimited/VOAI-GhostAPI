@@ -38,11 +38,65 @@ class _Links(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         values = dict(attrs)
-        if values.get("href"):
+        if tag == "a" and values.get("href"):
             self.links.append(values["href"] or "")
+        elif values.get("href"):
+            self.resources.append((values["href"] or "", tag))
         for key in ("src", "poster"):
             if values.get(key):
                 self.resources.append((values[key] or "", tag))
+        if values.get("srcset"):
+            for candidate in (values["srcset"] or "").split(","):
+                reference = candidate.strip().split(None, 1)[0]
+                if reference:
+                    self.resources.append((reference, tag))
+
+
+_RESOURCE_KINDS = frozenset(
+    {"html", "css", "js", "images", "svg", "fonts", "json", "video", "audio", "documents", "other"}
+)
+
+
+def _resource_kind(content_type: str, url: str) -> str:
+    mime = content_type.split(";", 1)[0].strip().lower()
+    suffix = Path(urlsplit(url).path).suffix.lower()
+    if mime == "text/html" or suffix in {".html", ".htm"}:
+        return "html"
+    if mime == "text/css" or suffix == ".css":
+        return "css"
+    if "javascript" in mime or mime in {"application/ecmascript", "text/ecmascript"} or suffix in {".js", ".mjs", ".cjs"}:
+        return "js"
+    if mime == "application/json" or mime.endswith("+json") or suffix in {".json", ".map"}:
+        return "json"
+    if mime == "image/svg+xml" or suffix == ".svg":
+        return "svg"
+    if mime.startswith("image/"):
+        return "images"
+    if mime.startswith("font/") or suffix in {".woff", ".woff2", ".ttf", ".otf", ".eot"}:
+        return "fonts"
+    if mime.startswith("video/") or suffix in {".mp4", ".webm", ".mov", ".m4v"}:
+        return "video"
+    if mime.startswith("audio/") or suffix in {".mp3", ".wav", ".ogg", ".m4a"}:
+        return "audio"
+    if mime in {"application/pdf", "application/msword", "application/rtf"} or suffix in {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".ppt", ".pptx", ".zip"}:
+        return "documents"
+    return "other"
+
+
+def _resource_suffix(url: str, content_type: str) -> str:
+    suffix = Path(urlsplit(url).path).suffix.lower()
+    if suffix and len(suffix) <= 10 and suffix[1:].replace("_", "").isalnum():
+        return suffix
+    mime = content_type.split(";", 1)[0].strip().lower()
+    return {
+        "text/html": ".html",
+        "text/css": ".css",
+        "application/javascript": ".js",
+        "text/javascript": ".js",
+        "application/json": ".json",
+        "image/svg+xml": ".svg",
+        "application/pdf": ".pdf",
+    }.get(mime, ".bin")
 
 
 def build_snapshot(website_dir: Path, snapshot_dir: Path) -> dict[str, object]:
@@ -139,9 +193,11 @@ def _normalize(url: str) -> str:
 async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, resume: bool = False) -> dict[str, object]:
     start = validate_url(url)
     origin = urlsplit(start).netloc.lower()
-    _safe_output(output)
+    if resume and output.exists() and not (output / "checkpoint.json").is_file():
+        raise ValueError("resume requires an existing extraction checkpoint")
+    _safe_output(output, allow_nonempty=resume)
     resources = output / "resources"
-    resources.mkdir()
+    resources.mkdir(exist_ok=True)
     checkpoint = output / "checkpoint.json"
     queue: deque[tuple[str, int]] = deque([(start, 0)])
     seen: set[str] = set()
@@ -154,6 +210,11 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
     skipped = 0
     failed = 0
     api_observations: list[dict[str, object]] = []
+    resource_records: list[dict[str, object]] = []
+    content_targets: dict[str, Path] = {}
+    selected_types = set(resource_types) & set(_RESOURCE_KINDS)
+    if "images" in selected_types:
+        selected_types.add("svg")
     async with httpx.AsyncClient(follow_redirects=True, timeout=timeout) as client:
         robots = urllib.robotparser.RobotFileParser()
         try:
@@ -203,15 +264,28 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                     skipped += 1
                     continue
                 total_bytes += len(content)
-                digest = hashlib.sha256(content).hexdigest()
-                suffix = Path(urlsplit(current).path).suffix or ".html"
-                target = resources / f"{digest}{suffix}"
                 content_type = response.headers.get("content-type", "")
-                kind = "html" if "text/html" in content_type else "css" if "text/css" in content_type else "js" if "javascript" in content_type else "json" if "json" in content_type else "images" if content_type.startswith("image/") else "other"
-                if kind in resource_types and not target.exists():
-                    target.write_bytes(content)
-                record: dict[str, object] = {"url": current, "source_page": current, "status": response.status_code, "path": str(target.relative_to(output)), "sha256": digest, "size": len(content), "content_type": response.headers.get("content-type", "")}
+                digest = hashlib.sha256(content).hexdigest()
+                kind = _resource_kind(content_type, current)
+                selected = "all" in resource_types or kind in selected_types
+                target = content_targets.get(digest)
+                if selected and target is None:
+                    target = resources / f"{digest}{_resource_suffix(current, content_type)}"
+                    if not target.exists():
+                        target.write_bytes(content)
+                    content_targets[digest] = target
+                record: dict[str, object] = {
+                    "url": current,
+                    "source_page": current,
+                    "status": response.status_code,
+                    "path": str(target.relative_to(output)) if target is not None else None,
+                    "sha256": digest,
+                    "size": len(content),
+                    "content_type": content_type,
+                    "extraction_status": "downloaded" if selected else "skipped by resource selection",
+                }
                 record["resource_type"] = kind
+                resource_records.append(record)
                 if kind == "json":
                     counter = [0]
                     try:
@@ -238,7 +312,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                 pages.append({"url": current, "error": str(exc)})
                 failed += 1
             checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
-    report = {"start_url": start, "pages": pages, "api_observations": api_observations, "discovered": len(seen), "processed": len(pages), "skipped": skipped, "failed": failed, "pending": len(queue), "downloaded_bytes": total_bytes, "max_pages": max_pages, "max_depth": max_depth}
+    report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(seen), "processed": len(pages), "skipped": skipped, "failed": failed, "pending": len(queue), "downloaded_bytes": total_bytes, "downloaded_resources": len(content_targets), "max_pages": max_pages, "max_depth": max_depth}
     (output / "extraction.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
     return report

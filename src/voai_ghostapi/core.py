@@ -155,7 +155,7 @@ def merge_schemas(shapes: list[Any]) -> Any:
     return result
 
 
-def _safe_output(output: Path) -> None:
+def _safe_output(output: Path, *, allow_nonempty: bool = False) -> None:
     if output.is_symlink():
         raise ValueError("output path may not be a symlink")
     for parent in output.parents:
@@ -172,7 +172,7 @@ def _safe_output(output: Path) -> None:
         )
         if parent.is_symlink() and not is_macos_var_alias:
             raise ValueError("output path may not traverse a symlink")
-    if output.exists() and any(output.iterdir()):
+    if output.exists() and not allow_nonempty and any(output.iterdir()):
         raise ValueError("output directory must be empty")
     output.mkdir(parents=True, exist_ok=True)
 

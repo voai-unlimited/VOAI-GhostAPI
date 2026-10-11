@@ -87,6 +87,8 @@ For bounded website extraction, use explicit confirmation or `--yes` for automat
 
 ```powershell
 voai-ghostapi extract --url https://example.com --scope page --resources html,css,js --yes
+voai-ghostapi extract --url https://example.com --scope page --resources html,css,js,images,svg,fonts,json,video,audio,documents --yes
+voai-ghostapi extract --url https://example.com --scope page --resources all --snapshot --yes
 voai-ghostapi extract --url https://example.com --scope site --max-pages 20 --max-depth 2 --snapshot --yes
 voai-ghostapi extract --url https://example.com --scope site --resume --yes
 voai-ghostapi extract --url https://example.com --har capture.har --output ./extracted --yes
@@ -100,6 +102,13 @@ and applies page, depth, per-resource, and total-download limits. `--interactive
 read-only observation pass installed with `pip install .[browser]` and a Playwright browser runtime. It records
 observed JSON responses in `website/interactive.json`; it does not click controls or replay state-changing requests.
 Authentication flows and complete offline behavior are not inferred automatically.
+
+Resource selection accepts `html`, `css`, `js`, `images`, `svg`, `fonts`, `json`,
+`video`, `audio`, `documents`, and `all`. Every fetched resource is recorded in
+`website/extraction.json` with its URL, source page, MIME type, status, size, SHA-256
+checksum, and local path when it was selected for download. Identical content is
+stored once by checksum. Snapshot rewriting covers HTML attributes, CSS `url(...)`,
+and JavaScript `fetch(...)`/`import(...)` references when the target was downloaded.
 
 To preview a generated snapshot locally:
 
