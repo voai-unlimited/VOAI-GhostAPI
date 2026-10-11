@@ -30,7 +30,9 @@ flowchart LR
 
 ## Requirements
 
-Python 3.11+.
+Python 3.11 or 3.12. These are the versions covered by the CI matrix. Python
+3.13 and newer are not currently supported because the compiled dependency
+set is not verified on those interpreters.
 
 ## Installation
 
