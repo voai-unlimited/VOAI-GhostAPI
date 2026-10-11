@@ -43,16 +43,22 @@ def test_playwright_discovers_dynamic_json_and_authorized_session(tmp_path: Path
         state = tmp_path / "state.json"
         state.write_text(json.dumps({"cookies": [{"name": "session", "value": "authorized", "domain": "127.0.0.1", "path": "/"}]}), encoding="utf-8")
         observations = asyncio.run(discover_api_requests(f"http://127.0.0.1:{server.server_port}/", storage_state=state))
-        assert any(item["url"].endswith("/api.json") and item["status"] == 200 for item in observations)
+        api = next(item for item in observations if item["url"].endswith("/api.json"))
+        assert api["status"] == 200
+        assert api["path"] == "/api.json"
+        assert api["response_sample"] == {"items": [1, 2]}
+        assert api["observed"] is True
+        assert api["discovery_status"] == "observed"
+        assert api["interaction_type"] == "navigation"
         interacted = asyncio.run(
             discover_api_requests(
                 f"http://127.0.0.1:{server.server_port}/",
                 storage_state=state,
                 interactions=[
-                    {"action": "click", "selector": "#tab"},
-                    {"action": "fill", "selector": "#filter", "value": "active"},
-                    {"action": "click", "selector": "#page"},
-                    {"action": "scroll", "distance": 400},
+                    {"action": "click", "kind": "tab", "selector": "#tab"},
+                    {"action": "fill", "kind": "filter", "selector": "#filter", "value": "active"},
+                    {"action": "click", "kind": "pagination", "selector": "#page"},
+                    {"action": "scroll", "kind": "infinite-scroll", "distance": 400},
                 ],
             )
         )
@@ -60,6 +66,9 @@ def test_playwright_discovers_dynamic_json_and_authorized_session(tmp_path: Path
         assert any(item["url"].endswith("/api-page") for item in interacted)
         assert any(item.get("triggering_interaction") == "click-1" for item in interacted if item["url"].endswith("/api-tab"))
         assert any(item.get("triggering_interaction") == "click-3" for item in interacted if item["url"].endswith("/api-page"))
+        page_item = next(item for item in interacted if item["url"].endswith("/api-page"))
+        assert page_item["interaction_type"] == "pagination"
+        assert page_item["source_page"].startswith("http://127.0.0.1:")
     finally:
         server.shutdown()
         thread.join(timeout=5)

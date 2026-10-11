@@ -150,6 +150,11 @@ def extract(
     interactive: bool = typer.Option(False, "--interactive", help="Observe JSON API requests during a read-only browser load."),
     storage_state: Path | None = typer.Option(None, "--storage-state", help="Authorized Playwright storage-state JSON file."),  # noqa: B008
     interactions: Path | None = typer.Option(None, "--interactions", help="JSON list of safe read-only browser interaction recipes."),  # noqa: B008
+    manual_login: bool = typer.Option(False, "--manual-login", help="Open a visible browser for an authorized manual login."),
+    interactive_max_seconds: float = typer.Option(120.0, "--interactive-max-seconds", min=1, max=3600),
+    interactive_max_memory_mb: int = typer.Option(64, "--interactive-max-memory-mb", min=1, max=1024),
+    interactive_max_observations: int = typer.Option(1000, "--interactive-max-observations", min=1, max=10000),
+    login_wait_seconds: int = typer.Option(60, "--login-wait-seconds", min=0, max=600),
 ):
     """Extract a website, HAR files, or both into separate output areas."""
     if not url and not har:
@@ -215,7 +220,16 @@ def extract(
                         raise ValueError("interactions file must contain a JSON list of objects")
                     recipes = recipes_value
                 observations = __import__("asyncio").run(
-                    discover_api_requests(url, storage_state=storage_state, interactions=recipes)
+                    discover_api_requests(
+                        url,
+                        storage_state=storage_state,
+                        interactions=recipes,
+                        max_seconds=interactive_max_seconds,
+                        max_memory_bytes=interactive_max_memory_mb * 1024 * 1024,
+                        max_observations=interactive_max_observations,
+                        manual_login=manual_login,
+                        login_wait_ms=login_wait_seconds * 1000,
+                    )
                 )
                 for observation in observations:
                     observation.setdefault("source_page", url)
@@ -225,11 +239,14 @@ def extract(
                     max_resource_bytes=max_resource_mb * 1024 * 1024,
                     max_resources=max_resources,
                 )
-            except (RuntimeError, OSError, ValueError) as exc:
+            except (RuntimeError, OSError, ValueError, TimeoutError) as exc:
                 console.print(f"[red]Interactive discovery unavailable:[/red] {exc}")
                 raise typer.Exit(code=1) from exc
             (output / "website" / "interactive.json").write_text(json.dumps(observations, indent=2), encoding="utf-8")
-            console.print(f"Interactive resources observed: {len(observations)}; persisted: {len(persisted)}")
+            console.print(
+                f"Interactive resources observed: {len(observations)}; persisted: {len(persisted)} "
+                "(observed traffic only; discovery is not necessarily complete)"
+            )
 
 
 @app.command()

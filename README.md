@@ -95,6 +95,7 @@ voai-ghostapi extract --url https://example.com --scope site --resume --yes
 voai-ghostapi extract --url https://example.com --har capture.har --output ./extracted --yes
 voai-ghostapi extract --url https://example.com --interactive --yes
 voai-ghostapi extract --url https://example.com --interactive --storage-state state.json --interactions interactions.json --yes
+voai-ghostapi extract --url https://example.com --interactive --manual-login --login-wait-seconds 60 --yes
 voai-ghostapi wizard
 ```
 
@@ -102,14 +103,21 @@ Website output is kept under `website/`; optional snapshots are under `snapshot/
 The crawler stays on the requested origin, blocks local and private destinations,
 and applies page, depth, concurrency, crawl-delay, per-resource, and total-download limits. `--interactive` is an optional browser-backed,
 read-only observation pass installed with `pip install .[browser]` and a Playwright browser runtime. It records
-observed JSON responses in `website/interactive.json`; it does not click controls or replay state-changing requests.
-Authentication flows and complete offline behavior are not inferred automatically.
+observed API/resource responses in `website/interactive.json`; it reports observed traffic only and never claims
+complete API discovery. Safe recipes may click navigation, tabs, pagination, expandable sections, fill read-only
+filters/search fields, select options, or scroll for infinite-loading content. It never replays state-changing
+requests automatically. Unknown and destructive actions require an explicit separate workflow and are rejected by
+the automatic observer. Authentication is supported only through a user-provided authorized storage-state file or
+the bounded visible `--manual-login` window; passwords and storage-state contents are not persisted.
 The crawler reads same-origin XML sitemap sets and nested sitemap indexes, uses breadth-first batches,
 normalizes tracking query parameters, and caps query variants per path to prevent pagination loops.
 Authorized browser sessions can be supplied with a Playwright storage-state JSON file.
 Read-only recipes in a JSON array support `click`, `fill`, `select`, and bounded
-`scroll` actions; each observed response records the triggering interaction. Unknown
-or state-changing actions are rejected.
+`scroll` actions with optional `kind` values (`navigation`, `tab`, `filter`, `search`,
+`pagination`, `infinite-scroll`, or `expand`); each observed response records the triggering
+interaction, request parameters/body shape, response sample, source page, status, and MIME type.
+Unknown or state-changing actions are rejected. Interactive runs are bounded by interaction count,
+time, memory, response size, and observation count.
 
 Resource selection accepts `html`, `css`, `js`, `images`, `svg`, `fonts`, `json`,
 `manifests`, `icons`, `video`, `audio`, `documents`, and `all`. External and inline
