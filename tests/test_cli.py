@@ -150,7 +150,8 @@ def test_large_extract_requires_explicit_threshold_confirmation(tmp_path):
     # Rich may wrap the option name at a terminal-width-dependent boundary.
     # Normalize whitespace before checking the safety diagnostic so this test
     # remains stable across the Windows, Linux, and macOS runners.
-    diagnostic = re.sub(r"\s+", "", result.output)
+    diagnostic = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+    diagnostic = re.sub(r"\s+", "", diagnostic)
     assert "confirm-large" in diagnostic
 
 
