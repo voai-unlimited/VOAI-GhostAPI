@@ -137,6 +137,8 @@ def extract(
     max_total_mb: int = typer.Option(50, min=1, max=1000),
     resume: bool = typer.Option(False, "--resume", help="Resume from the website checkpoint."),
     interactive: bool = typer.Option(False, "--interactive", help="Observe JSON API requests during a read-only browser load."),
+    storage_state: Path | None = typer.Option(None, "--storage-state", help="Authorized Playwright storage-state JSON file."),  # noqa: B008
+    interactions: Path | None = typer.Option(None, "--interactions", help="JSON list of safe read-only browser interaction recipes."),  # noqa: B008
 ):
     """Extract a website, HAR files, or both into separate output areas."""
     if not url and not har:
@@ -173,7 +175,15 @@ def extract(
             )
         if interactive:
             try:
-                observations = __import__("asyncio").run(discover_api_requests(url))
+                recipes = None
+                if interactions is not None:
+                    recipes_value = json.loads(interactions.read_text(encoding="utf-8"))
+                    if not isinstance(recipes_value, list) or not all(isinstance(item, dict) for item in recipes_value):
+                        raise ValueError("interactions file must contain a JSON list of objects")
+                    recipes = recipes_value
+                observations = __import__("asyncio").run(
+                    discover_api_requests(url, storage_state=storage_state, interactions=recipes)
+                )
             except (RuntimeError, OSError, ValueError) as exc:
                 console.print(f"[red]Interactive discovery unavailable:[/red] {exc}")
                 raise typer.Exit(code=1) from exc

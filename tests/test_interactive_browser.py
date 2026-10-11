@@ -58,6 +58,19 @@ def test_playwright_discovers_dynamic_json_and_authorized_session(tmp_path: Path
         )
         assert any(item["url"].endswith("/api-tab") for item in interacted)
         assert any(item["url"].endswith("/api-page") for item in interacted)
+        assert any(item.get("triggering_interaction") == "click-1" for item in interacted if item["url"].endswith("/api-tab"))
+        assert any(item.get("triggering_interaction") == "click-3" for item in interacted if item["url"].endswith("/api-page"))
     finally:
         server.shutdown()
         thread.join(timeout=5)
+
+
+def test_interactive_recipes_reject_unsafe_actions():
+    with pytest.raises(ValueError, match="only click"):
+        asyncio.run(discover_api_requests("https://example.test", interactions=[{"action": "delete"}]))
+
+
+def test_interactive_recipes_are_bounded():
+    recipes = [{"action": "scroll"}] * 51
+    with pytest.raises(ValueError, match="at most"):
+        asyncio.run(discover_api_requests("https://example.test", interactions=recipes))

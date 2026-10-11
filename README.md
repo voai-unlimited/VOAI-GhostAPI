@@ -93,6 +93,7 @@ voai-ghostapi extract --url https://example.com --scope site --max-pages 20 --ma
 voai-ghostapi extract --url https://example.com --scope site --resume --yes
 voai-ghostapi extract --url https://example.com --har capture.har --output ./extracted --yes
 voai-ghostapi extract --url https://example.com --interactive --yes
+voai-ghostapi extract --url https://example.com --interactive --storage-state state.json --interactions interactions.json --yes
 voai-ghostapi wizard
 ```
 
@@ -102,6 +103,10 @@ and applies page, depth, per-resource, and total-download limits. `--interactive
 read-only observation pass installed with `pip install .[browser]` and a Playwright browser runtime. It records
 observed JSON responses in `website/interactive.json`; it does not click controls or replay state-changing requests.
 Authentication flows and complete offline behavior are not inferred automatically.
+Authorized browser sessions can be supplied with a Playwright storage-state JSON file.
+Read-only recipes in a JSON array support `click`, `fill`, `select`, and bounded
+`scroll` actions; each observed response records the triggering interaction. Unknown
+or state-changing actions are rejected.
 
 Resource selection accepts `html`, `css`, `js`, `images`, `svg`, `fonts`, `json`,
 `video`, `audio`, `documents`, and `all`. Every fetched resource is recorded in
