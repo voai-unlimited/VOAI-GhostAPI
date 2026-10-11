@@ -75,13 +75,30 @@ mock server before cleaning its generated directory.
 
 The import command expects a HAR file in the current project folder. For example, save an authorized browser capture as `capture.har`, then run the commands above. Open `http://127.0.0.1:8000/docs` to explore the generated mock.
 
-## Website and Combined Extraction
+## Extraction modes
 
-The original HAR workflow remains network-free:
+The original HAR-to-FastAPI workflow remains the smallest and most predictable
+workflow. It never contacts the captured website:
 
 ```powershell
 voai-ghostapi import capture.har --output ./workspace
+voai-ghostapi inspect ./workspace
+voai-ghostapi validate ./workspace
+voai-ghostapi generate ./workspace --output ./generated
+voai-ghostapi serve ./generated --port 8000
 ```
+
+The `import` command accepts HAR 1.2 JSON and can be used with the existing
+workspace, inspection, validation, generation, and local serving commands.
+Credentials and other sensitive values are sanitized before the workspace is
+written. Multiple captures are supported by repeating `--har` with `extract`.
+
+### Website URL extraction
+
+Use `extract --url` when the source is an authorized website. The default
+`page` scope fetches one page and its selected resource references. `site` uses
+bounded breadth-first crawling of same-origin pages, while `selected` processes
+only the paths supplied with `--pages`:
 
 For bounded website extraction, use explicit confirmation or `--yes` for automation:
 
@@ -99,62 +116,127 @@ voai-ghostapi extract --url https://example.com --interactive --manual-login --l
 voai-ghostapi wizard
 ```
 
-Website output is kept under `website/`; optional snapshots are under `snapshot/`.
-The crawler stays on the requested origin, blocks local and private destinations,
-and applies page, depth, concurrency, crawl-delay, per-resource, and total-download limits. `--interactive` is an optional browser-backed,
-read-only observation pass installed with `pip install .[browser]` and a Playwright browser runtime. It records
-observed API/resource responses in `website/interactive.json`; it reports observed traffic only and never claims
-complete API discovery. Safe recipes may click navigation, tabs, pagination, expandable sections, fill read-only
-filters/search fields, select options, or scroll for infinite-loading content. It never replays state-changing
-requests automatically. Unknown and destructive actions require an explicit separate workflow and are rejected by
-the automatic observer. Authentication is supported only through a user-provided authorized storage-state file or
-the bounded visible `--manual-login` window; passwords and storage-state contents are not persisted.
-The crawler reads same-origin XML sitemap sets and nested sitemap indexes, uses breadth-first batches,
-normalizes tracking query parameters, and caps query variants per path to prevent pagination loops.
-Authorized browser sessions can be supplied with a Playwright storage-state JSON file.
-Read-only recipes in a JSON array support `click`, `fill`, `select`, and bounded
-`scroll` actions with optional `kind` values (`navigation`, `tab`, `filter`, `search`,
-`pagination`, `infinite-scroll`, or `expand`); each observed response records the triggering
-interaction, request parameters/body shape, response sample, source page, status, and MIME type.
-Unknown or state-changing actions are rejected. Interactive runs are bounded by interaction count,
-time, memory, response size, and observation count.
+`--yes` confirms a preflight summary for automation. Without it, the CLI asks
+for confirmation before network work begins. `wizard` provides the same mode,
+scope, resource, output, and confirmation steps interactively.
 
-Resource selection accepts `html`, `css`, `js`, `images`, `svg`, `fonts`, `json`,
-`manifests`, `icons`, `video`, `audio`, `documents`, and `all`. External and inline
-CSS, JavaScript, and JSON-LD are recorded when their resource class is selected.
-Every fetched resource is recorded in
-`website/extraction.json` with its URL, source page, MIME type, status, size, SHA-256
-checksum, and local path when it was selected for download. Identical content is
-stored once by checksum. Snapshot rewriting covers HTML attributes, CSS `url(...)`,
-and JavaScript `fetch(...)`/`import(...)` references when the target was downloaded.
-Use `--max-resource-mb`, `--max-total-mb`, `--max-resources`, and `--max-seconds`
-to bound individual files, aggregate bytes, resource count, and extraction time.
-Website extraction displays a live Rich dashboard with mode, stage, page/resource/API
-counters, bytes, and elapsed time without presenting an invented percentage. Each run
-writes `extraction-report.json` with successful, failed, and skipped pages, API totals,
-download size, warnings, and coverage limitations. Press Ctrl+C to retain the checkpoint
-and resume with `--resume`. Large runs show a time/disk/access warning; automated runs
-above the configured threshold must include `--confirm-large`.
-Use `clear` to explicitly select no downloadable website resources. HAR inputs are
-prevalidated before confirmation and persistent workspace creation. Combined runs
-keep website resources under `website/` and mark exact duplicate observations from
-both pipelines with source `both`.
-HAR, website, and combined API observations are normalized into the same versioned
-workspace inventory before schema inference and FastAPI generation. Equivalent dynamic
-routes are deduplicated, distinct status or response variants remain represented, and
-generated output refuses to overwrite a non-empty directory.
+### HAR-only extraction
 
-To preview a generated snapshot locally:
+HAR-only extraction remains independent of networking and Playwright:
 
 ```powershell
+voai-ghostapi extract --har capture.har --output ./extracted --yes
+voai-ghostapi extract --har first.har --har second.har --output ./extracted --yes
+```
+
+HAR files are validated before confirmation and imported into the same unified
+inventory used by website extraction. The generated mock is deterministic and
+works offline.
+
+### Combined extraction
+
+Provide both inputs to merge captured traffic with a bounded website crawl:
+
+```powershell
+voai-ghostapi extract --url https://example.com --har capture.har `
+  --scope site --max-pages 20 --max-depth 2 --output ./extracted --yes
+```
+
+Equivalent observations are deduplicated, distinct status or response variants
+are retained, and provenance is recorded as `har`, `website`, or `both`.
+Website resources remain under `website/`; API observations are persisted under
+`workspace/` and can be sent to the normal `generate` command.
+
+## Crawling, resources, and limits
+
+`page` and `site` are deliberately different scopes: page scope sets one page
+and depth zero; site scope follows bounded same-origin links and sitemap URLs.
+`selected` accepts comma-separated paths and does not follow unrelated links.
+The crawler normalizes URLs, caps query variants, follows safe same-origin
+redirects, reads nested XML sitemaps, applies robots rules, and uses bounded
+concurrency with retry backoff. It records failures and continues where it can.
+
+Select resources with `--resources` (comma-separated): `html`, `css`, `js`,
+`images`, `svg`, `fonts`, `json`, `manifests`, `icons`, `video`, `audio`,
+`documents`, or `all`. Use `clear` for no downloadable website resources.
+Inline CSS, JavaScript, and JSON-LD are recorded when their resource class is
+selected. Files are deduplicated by SHA-256 and tracked in
+`website/extraction.json` with source URL, source page, MIME type, status, size,
+checksum, and local path.
+
+Bound the run with `--max-pages`, `--max-depth`, `--concurrency`,
+`--crawl-delay`, `--max-resources`, `--max-resource-mb`, `--max-total-mb`, and
+`--max-seconds`. `--resume` uses the checkpoint retained after cancellation.
+Large runs display a time, disk, and accessibility warning; automated runs over
+the configured threshold also require `--confirm-large`.
+
+The Rich dashboard reports the current stage, current page, discovered,
+completed, skipped, failed, resource, API, byte, pending, and elapsed-time
+counters. It does not display a percentage when the total is unknown. Each
+run writes `extraction-report.json` with page outcomes, API totals, byte totals,
+warnings, and coverage limitations.
+
+## Interactive API discovery
+
+`--interactive` enables an optional Playwright pass that observes requests and
+responses triggered by a permitted page load or bounded read-only recipes:
+
+```powershell
+python -m pip install ".[browser]"
+playwright install chromium
+voai-ghostapi extract --url https://example.com --interactive `
+  --storage-state state.json --interactions interactions.json --yes
+```
+
+Recipes can click navigation, tabs, pagination, and expandable sections; fill
+read-only search or filter inputs; select options; and scroll for bounded
+infinite-loading content. Unknown and state-changing actions are rejected.
+Interactive output is written to `website/interactive.json` and reports only
+observed traffic; it does not claim complete API discovery.
+
+Authentication is limited to an authorized Playwright storage-state file or a
+visible `--manual-login` session. Do not provide passwords to the CLI. Cookies,
+authorization headers, browser storage, and session tokens are not persisted.
+
+## Offline website snapshots
+
+Add `--snapshot` to copy downloaded website files into a separate local
+snapshot:
+
+```powershell
+voai-ghostapi extract --url https://example.com --scope page `
+  --resources all --snapshot --yes
 voai-ghostapi preview ./extracted/snapshot --port 8001
 ```
 
-Snapshots are separate from the generated FastAPI mock. `snapshot/snapshot.json`
-records copied files, original-URL-to-local-path mappings, unresolved references,
-and limitations. Only resources that were actually downloaded are rewritten;
-authentication, server-rendered behavior, live APIs, and third-party integrations
-may need additional services when previewed offline.
+The snapshot manifest maps original URLs to local paths and lists unresolved
+references and limitations. HTML attributes, CSS `url(...)`, and recognized
+JavaScript `fetch(...)`/`import(...)` references are rewritten when the target
+was downloaded. Authentication, server-side rendering, live APIs, third-party
+integrations, and resources blocked by limits or origin policy may not work
+offline. Snapshots are separate from generated FastAPI mocks.
+
+## Output layout
+
+Website and combined runs use this layout:
+
+```text
+extracted/
+├── extraction-report.json
+├── website/
+│   ├── extraction.json
+│   ├── checkpoint.json
+│   ├── interactive.json          # when --interactive is enabled
+│   └── resources/
+├── workspace/
+│   └── workspace.json             # when API observations exist
+└── snapshot/                      # when --snapshot is enabled
+    └── snapshot.json
+```
+
+The generated FastAPI application remains a separate directory selected with
+`generate --output`. Existing generated output is never overwritten unless it
+is empty or explicitly removed with the safety-checked `clean` command.
 
 ## CLI Commands
 
