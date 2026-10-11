@@ -216,40 +216,66 @@ def _resource_suffix(url: str, content_type: str) -> str:
 
 
 def build_snapshot(website_dir: Path, snapshot_dir: Path) -> dict[str, object]:
-    """Create a conservative local HTML snapshot from downloaded pages."""
+    """Create a conservative local snapshot from downloaded pages and resources."""
     if not website_dir.is_dir():
         raise ValueError("website extraction directory does not exist")
     _safe_output(snapshot_dir)
     mapping: dict[str, str] = {}
     url_map: dict[str, str] = {}
+    path_to_url: dict[str, str] = {}
     report_path = website_dir / "extraction.json"
     if report_path.is_file():
         try:
             report = json.loads(report_path.read_text(encoding="utf-8"))
-            for page in report.get("pages", []):
+            records = [*report.get("pages", []), *report.get("resources", [])]
+            for page in records:
                 if isinstance(page, dict) and page.get("url") and page.get("path"):
-                    url_map[str(page["url"])] = str(page["path"]).replace("\\", "/")
+                    original = str(page["url"])
+                    relative = str(page["path"]).replace("\\", "/")
+                    url_map[_normalize(original)] = relative
+                    url_map.setdefault(original, relative)
+                    path_to_url.setdefault(relative, original)
         except (OSError, TypeError, ValueError):
             url_map = {}
+            path_to_url = {}
     copied = 0
+    unresolved: list[dict[str, str]] = []
+    unresolved_seen: set[tuple[str, str]] = set()
+
+    def local_reference(source_url: str, reference: str, destination: Path) -> str | None:
+        if not reference or reference.startswith(("#", "data:", "blob:", "javascript:", "mailto:", "tel:")):
+            if reference.startswith("#"):
+                target = url_map.get(_normalize(source_url))
+                if target:
+                    current = destination.relative_to(snapshot_dir).parent.as_posix()
+                    return posixpath.relpath(Path(target).as_posix(), current or ".") + reference
+            return None
+        target = url_map.get(_normalize(urljoin(source_url, reference))) if source_url else None
+        if target:
+            current = destination.relative_to(snapshot_dir).parent.as_posix()
+            return posixpath.relpath(Path(target).as_posix(), current or ".")
+        key = (source_url, reference)
+        if key not in unresolved_seen:
+            unresolved_seen.add(key)
+            unresolved.append({"source": source_url, "reference": reference, "reason": "target was not downloaded"})
+        return None
+
     for source in website_dir.rglob("*"):
         if not source.is_file() or source.name == "extraction.json":
             continue
         destination = snapshot_dir / source.relative_to(website_dir)
         destination.parent.mkdir(parents=True, exist_ok=True)
         content = source.read_bytes()
+        source_rel = str(source.relative_to(website_dir)).replace("\\", "/")
+        source_url = path_to_url.get(source_rel, "")
         if source.suffix.lower() in {".html", ".htm"}:
             text = content.decode("utf-8", "replace")
-            source_rel = str(source.relative_to(website_dir)).replace("\\", "/")
-            source_url = next((url for url, path in url_map.items() if path == source_rel), "")
             for match in re.finditer(r"(?P<prefix>(?:href|src|poster)=[\"'])(?P<ref>[^\"']+)", text, re.IGNORECASE):
                 reference = match.group("ref")
-                target = url_map.get(_normalize(urljoin(source_url, reference))) if source_url else None
-                if target:
-                    local = Path(target).as_posix()
-                    current = destination.relative_to(snapshot_dir).parent.as_posix()
-                    replacement = posixpath.relpath(local, current or ".")
+                replacement = local_reference(source_url, reference, destination)
+                if replacement:
                     text = text.replace(match.group("prefix") + reference, match.group("prefix") + replacement, 1)
+
             def rewrite_srcset(
                 match: re.Match[str],
                 *,
@@ -262,10 +288,9 @@ def build_snapshot(website_dir: Path, snapshot_dir: Path) -> dict[str, object]:
                     pieces = candidate.strip().split(None, 1)
                     if not pieces:
                         continue
-                    target = url_map.get(_normalize(urljoin(source_url, pieces[0]))) if source_url else None
-                    if target:
-                        current = destination.relative_to(snapshot_dir).parent.as_posix()
-                        pieces[0] = posixpath.relpath(Path(target).as_posix(), current or ".")
+                    replacement = local_reference(source_url, pieces[0], destination)
+                    if replacement:
+                        pieces[0] = replacement
                     rewritten.append(" ".join(pieces))
                 return prefix + ", ".join(rewritten) + match.group("quote")
 
@@ -273,37 +298,42 @@ def build_snapshot(website_dir: Path, snapshot_dir: Path) -> dict[str, object]:
             destination.write_text(text, encoding="utf-8")
         elif source.suffix.lower() == ".css":
             text = content.decode("utf-8", "replace")
-            source_rel = str(source.relative_to(website_dir)).replace("\\", "/")
-            source_url = next((url for url, path in url_map.items() if path == source_rel), "")
-            for match in re.finditer(r"url\((['\"]?)([^)'\"]+)\1\)", text, re.IGNORECASE):
+            for match in re.finditer(r"url\(([\"']?)([^)'\"]+)\1\)", text, re.IGNORECASE):
                 reference = match.group(2)
-                target = url_map.get(_normalize(urljoin(source_url, reference))) if source_url else None
-                if target:
-                    current = destination.relative_to(snapshot_dir).parent.as_posix()
-                    replacement = posixpath.relpath(Path(target).as_posix(), current or ".")
+                replacement = local_reference(source_url, reference, destination)
+                if replacement:
                     text = text.replace(match.group(0), f"url('{replacement}')", 1)
             destination.write_text(text, encoding="utf-8")
         elif source.suffix.lower() in {".js", ".mjs"}:
             text = content.decode("utf-8", "replace")
-            source_rel = str(source.relative_to(website_dir)).replace("\\", "/")
-            source_url = next((url for url, path in url_map.items() if path == source_rel), "")
             for match in re.finditer(r"(?P<prefix>(?:fetch|import)\(\s*['\"])(?P<ref>[^'\"]+)", text):
                 reference = match.group("ref")
-                target = url_map.get(_normalize(urljoin(source_url, reference))) if source_url else None
-                if target:
-                    current = destination.relative_to(snapshot_dir).parent.as_posix()
-                    replacement = posixpath.relpath(Path(target).as_posix(), current or ".")
+                replacement = local_reference(source_url, reference, destination)
+                if replacement:
                     text = text.replace(match.group("prefix") + reference, match.group("prefix") + replacement, 1)
             destination.write_text(text, encoding="utf-8")
         else:
             destination.write_bytes(content)
-        mapping[str(source.relative_to(website_dir))] = str(destination.relative_to(snapshot_dir))
+        relative_destination = str(destination.relative_to(snapshot_dir)).replace("\\", "/")
+        mapping[source_rel] = relative_destination
+        if source_url:
+            url_map.setdefault(source_url, relative_destination)
         copied += 1
-    report = {"files": copied, "mapping": mapping, "limitations": ["dynamic behavior and backend APIs remain online-dependent"]}
+    limitations = [
+        "dynamic behavior and backend APIs remain online-dependent",
+        "authentication, server-side rendering, and third-party integrations may require additional services",
+    ]
+    if unresolved:
+        limitations.append("some references were not downloaded and remain unchanged")
+    report = {
+        "files": copied,
+        "mapping": mapping,
+        "url_mapping": url_map,
+        "unresolved_references": unresolved,
+        "limitations": limitations,
+    }
     (snapshot_dir / "snapshot.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     return report
-
-
 def persist_interactive_resources(
     website_dir: Path,
     observations: list[dict[str, Any]],

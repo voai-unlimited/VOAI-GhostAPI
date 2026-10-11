@@ -140,6 +140,12 @@ To preview a generated snapshot locally:
 voai-ghostapi preview ./extracted/snapshot --port 8001
 ```
 
+Snapshots are separate from the generated FastAPI mock. `snapshot/snapshot.json`
+records copied files, original-URL-to-local-path mappings, unresolved references,
+and limitations. Only resources that were actually downloaded are rewritten;
+authentication, server-rendered behavior, live APIs, and third-party integrations
+may need additional services when previewed offline.
+
 ## CLI Commands
 
 `import` sanitizes a HAR into a workspace; `inspect` summarizes observations; `validate` checks its version and records; `generate` writes a runnable app; `serve` runs it on `127.0.0.1`.

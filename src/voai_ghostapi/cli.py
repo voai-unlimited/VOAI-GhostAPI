@@ -211,6 +211,17 @@ def extract(
                 f"failed: {report.get('failed', 0)}; "
                 f"downloaded: {report.get('downloaded_bytes', 0)} bytes"
             )
+        if snapshot:
+            snapshot_report = output / "snapshot" / "snapshot.json"
+            if snapshot_report.is_file():
+                manifest = json.loads(snapshot_report.read_text(encoding="utf-8"))
+                unresolved = manifest.get("unresolved_references", [])
+                console.print(
+                    f"Offline snapshot: {manifest.get('files', 0)} files; "
+                    f"unresolved references: {len(unresolved)}"
+                )
+                for limitation in manifest.get("limitations", []):
+                    console.print(f"Snapshot limitation: {limitation}")
         if interactive:
             try:
                 recipes = None

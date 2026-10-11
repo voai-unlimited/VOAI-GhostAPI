@@ -54,6 +54,20 @@ def test_preview_rejects_non_snapshot_directory(tmp_path):
     assert result.exit_code != 0
 
 
+def test_preview_serves_a_valid_snapshot(tmp_path, monkeypatch):
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    (snapshot / "snapshot.json").write_text('{"files": 1}', encoding="utf-8")
+    calls = []
+    monkeypatch.setattr(
+        "voai_ghostapi.cli.subprocess.run",
+        lambda args, cwd, check: calls.append((args, cwd, check)),
+    )
+    result = runner.invoke(app, ["preview", str(snapshot), "--port", "8123"])
+    assert result.exit_code == 0
+    assert calls and calls[0][0][3] == "8123" and calls[0][1] == snapshot
+
+
 def test_extract_requires_an_input_source(tmp_path):
     result = runner.invoke(app, ["extract", "--output", str(tmp_path / "out"), "--yes"])
     assert result.exit_code != 0
