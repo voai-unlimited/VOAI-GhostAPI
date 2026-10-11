@@ -121,6 +121,30 @@ markers and skips directories containing unexpected files. HAR captures, virtual
 environments, source files, and unrelated files are protected. Stop any running
 mock server before cleaning its generated directory.
 
+Website and combined extraction use `./extracted` by default and require that
+directory to be empty before starting. The cleanup command intentionally does
+not remove `extracted` because it is a general extraction result, not a
+recognized workspace or generated mock artifact. To preserve the existing
+result, choose another output directory:
+
+```bash
+voai-ghostapi extract --url https://example.com --output ./extracted-next
+```
+
+To remove the old result after checking the path, use the command for your
+shell:
+
+```powershell
+Remove-Item -LiteralPath .\extracted -Recurse -Force
+```
+
+```bash
+rm -rf -- ./extracted
+```
+
+These deletion commands are intentionally explicit; verify the directory is
+the disposable extraction output before running them.
+
 The import command expects a HAR file in the current project folder. For example, save an authorized browser capture as `capture.har`, then run the commands above. Open `http://127.0.0.1:8000/docs` to explore the generated mock.
 
 ## Extraction modes

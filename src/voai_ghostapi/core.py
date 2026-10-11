@@ -179,7 +179,9 @@ def _safe_output(output: Path, *, allow_nonempty: bool = False) -> None:
         if parent.is_symlink() and not is_macos_var_alias:
             raise ValueError("output path may not traverse a symlink")
     if output.exists() and not allow_nonempty and any(output.iterdir()):
-        raise ValueError("output directory must be empty")
+        raise ValueError(
+            "output directory must be empty; choose a new --output path or remove the existing output"
+        )
     output.mkdir(parents=True, exist_ok=True)
 
 
