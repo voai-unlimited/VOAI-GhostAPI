@@ -17,3 +17,7 @@ temp/
 tmpgen/
 .pytest-tmp/
 .venv*/
+
+.studio.sqlite3
+.pytest-local*/
+extracted-*/
