@@ -23,6 +23,8 @@ def test_authorized_live_site_discovery(tmp_path: Path) -> None:
     response = client.get("/api/discovery", params={"url": LIVE_URL, "max_pages": 5, "max_depth": 1})
     assert response.status_code == 200, response.text
     payload = response.json()
+    assert payload["robots"]["enforced"] is True
+    assert payload["robots"]["user_agent"] == "VOAI-GhostAPI-Studio"
     if payload["count"] == 0:
         pytest.skip(f"live target was unreachable or exposed no crawlable URLs: {payload.get('skipped', [])}")
     origin = LIVE_URL.rstrip("/") + "/"

@@ -66,3 +66,11 @@ If pytest's system temporary directory is locked on Windows, keep
 `--basetemp` inside the repository. If packaging fails with a missing
 Hatchling backend, install the development dependencies before rerunning the
 build.
+
+### Robots diagnostics
+
+Website discovery always enforces `robots.txt`; there is no bypass switch. The
+discovery response reports the robots URL, HTTP status, whether a policy was
+loaded, the `VOAI-GhostAPI-Studio` user-agent, and an `enforced` flag. Pages
+blocked by policy appear in `skipped` with reason `robots.txt`. Local fixture
+sites intended for discovery coverage should allow that user-agent explicitly.

@@ -631,12 +631,17 @@ def create_app(root: Path | None = None) -> FastAPI:
         queue: deque[str] = deque([start])
         depths: dict[str, int] = {start: 0}
         seen: set[str] = set()
+        robots_url = urljoin(start, "/robots.txt")
+        robots_status: int | None = None
+        robots_loaded = False
         async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
-            robots = urllib.robotparser.RobotFileParser(urljoin(start, "/robots.txt"))
+            robots = urllib.robotparser.RobotFileParser(robots_url)
             try:
-                robots_response = await client.get(urljoin(start, "/robots.txt"))
+                robots_response = await client.get(robots_url)
+                robots_status = robots_response.status_code
                 if robots_response.status_code == 200:
                     robots.parse(robots_response.text.splitlines())
+                    robots_loaded = True
             except httpx.HTTPError:
                 pass
             for sitemap_page in await _read_sitemap_urls(client, start, origin):
@@ -674,6 +679,8 @@ def create_app(root: Path | None = None) -> FastAPI:
                             depths[target] = current_depth + 1
                             queue.append(target)
         return {"start": start, "urls": urls, "edges": edges, "depths": depths,
+                "robots": {"url": robots_url, "status": robots_status, "loaded": robots_loaded,
+                           "user_agent": "VOAI-GhostAPI-Studio", "enforced": True},
                 "skipped": skipped, "count": len(urls), "truncated": bool(queue)}
 
     @app.get("/api/projects")
