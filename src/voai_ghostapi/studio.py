@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import hashlib
 import json
 import mimetypes
 import secrets
@@ -405,6 +406,11 @@ def create_app(root: Path | None = None) -> FastAPI:
             elif job.request.scope == "selected":
                 max_pages = min(max_pages, len(selected_pages))
 
+            cache_context = "anonymous"
+            if job.request.storage_state:
+                storage_path = state.safe_path(job.request.storage_state, must_exist=True)
+                cache_context = "storage-state:" + hashlib.sha256(storage_path.read_bytes()).hexdigest()
+
             workspace = await extract(
                 job.request.url or "",
                 output,
@@ -416,6 +422,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 resource_types=resource_types,
                 resume=job.request.resume,
                 incremental=job.request.incremental,
+                cache_context=cache_context,
                 snapshot=job.request.snapshot,
                 cancel_event=job.cancel_event,
                 progress=progress,
@@ -453,6 +460,14 @@ def create_app(root: Path | None = None) -> FastAPI:
             result = json.loads(report_path.read_text(encoding="utf-8")) if report_path.is_file() else {}
             result["workspace_observations"] = len(workspace.observations) if workspace else 0
             job.result = result
+            run_root = output / ".runs" / job.id
+            run_root.mkdir(parents=True, exist_ok=True)
+            for relative in ("extraction-report.json", "website/extraction.json", "workspace/workspace.json"):
+                source = output / relative
+                if source.is_file():
+                    destination = run_root / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source, destination)
             state.transition(job, "cancelled" if job.cancel_event.is_set() else "completed")
             job.emit({"stage": "complete", "status": job.status, **result})
             state.save_job(job, job.project_id, stage="complete")
@@ -709,6 +724,7 @@ def create_app(root: Path | None = None) -> FastAPI:
     async def project_runs(project: str) -> list[dict[str, Any]]:
         target = project_dir(project)
         summary = _workspace_summary(target)
+        saved_runs = target / ".runs"
         db = sqlite3.connect(state.db_path)
         rows = db.execute(
             "SELECT id,status,stage,created_at,started_at,completed_at,counters_json,checkpoint,result_manifest,error "
@@ -725,7 +741,7 @@ def create_app(root: Path | None = None) -> FastAPI:
                 "run": row[0], "status": row[1], "stage": row[2],
                 "created_at": row[3], "started_at": row[4], "completed_at": row[5],
                 "counters": counters, "checkpoint": row[7], "result_manifest": row[8], "error": row[9],
-                "path": str(target),
+                "path": str(saved_runs / row[0]) if (saved_runs / row[0]).is_dir() else str(target),
             })
         return result
 

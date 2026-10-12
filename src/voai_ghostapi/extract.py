@@ -532,7 +532,7 @@ async def _read_sitemap_urls(
     return pages
 
 
-async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, max_resources: int = 1000, max_seconds: float | None = None, resume: bool = False, incremental: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> dict[str, object]:
+async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, max_resources: int = 1000, max_seconds: float | None = None, resume: bool = False, incremental: bool = False, cache_context: str = "anonymous", cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> dict[str, object]:
     if not 1 <= concurrency <= 32:
         raise ValueError("concurrency must be between 1 and 32")
     if max_resources < 1:
@@ -584,7 +584,8 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
     if incremental and previous_manifest.is_file():
         try:
             old = json.loads(previous_manifest.read_text(encoding="utf-8"))
-            previous_records = {str(item["url"]): item for item in old.get("resources", []) if item.get("url")}
+            if old.get("cache_context", "anonymous") == cache_context:
+                previous_records = {str(item["url"]): item for item in old.get("resources", []) if item.get("url")}
         except (OSError, ValueError, TypeError):
             previous_records = {}
     pages: list[dict[str, object]] = []
@@ -619,7 +620,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
             progress(event)
 
     if cancel_event is not None and cancel_event.is_set():
-        report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(scheduled), "processed": 0, "completed": 0, "successful_pages": [], "failed_pages": [], "skipped_pages": [], "skipped": 0, "failed": 0, "pending": len(queue), "downloaded_bytes": 0, "downloaded_resources": 0, "resources_downloaded": 0, "unique_apis_discovered": 0, "max_resources": max_resources, "max_seconds": max_seconds, "timed_out": False, "cancelled": True, "max_pages": max_pages, "max_depth": max_depth, "warnings": ["Extraction cancelled before the first page was processed."], "coverage_limitations": ["No pages were processed."]}
+        report = {"start_url": start, "cache_context": cache_context, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(scheduled), "processed": 0, "completed": 0, "successful_pages": [], "failed_pages": [], "skipped_pages": [], "skipped": 0, "failed": 0, "pending": len(queue), "downloaded_bytes": 0, "downloaded_resources": 0, "resources_downloaded": 0, "unique_apis_discovered": 0, "max_resources": max_resources, "max_seconds": max_seconds, "timed_out": False, "cancelled": True, "max_pages": max_pages, "max_depth": max_depth, "warnings": ["Extraction cancelled before the first page was processed."], "coverage_limitations": ["No pages were processed."]}
         (output / "extraction.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
         checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
         emit("complete")
@@ -809,14 +810,14 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
         limitations.append(f"{len(queue)} discovered pages remain pending.")
     if any("skipped" in item for item in resource_records):
         warnings.append("Some resources were skipped by selection or configured limits.")
-    report = {"start_url": start, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(scheduled), "processed": len(pages), "completed": len(pages), "successful_pages": successful_pages, "failed_pages": failed_pages, "skipped_pages": skipped_pages, "skipped": skipped, "failed": failed, "pending": len(queue), "downloaded_bytes": total_bytes, "downloaded_resources": len(content_targets), "resources_downloaded": downloaded_resource_count, "unique_apis_discovered": len(unique_apis), "discovered_apis": unique_apis, "max_resources": max_resources, "max_seconds": max_seconds, "timed_out": timed_out, "cancelled": bool(cancel_event and cancel_event.is_set()), "max_pages": max_pages, "max_depth": max_depth, "warnings": warnings, "coverage_limitations": limitations}
+    report = {"start_url": start, "cache_context": cache_context, "pages": pages, "resources": resource_records, "api_observations": api_observations, "discovered": len(scheduled), "processed": len(pages), "completed": len(pages), "successful_pages": successful_pages, "failed_pages": failed_pages, "skipped_pages": skipped_pages, "skipped": skipped, "failed": failed, "pending": len(queue), "downloaded_bytes": total_bytes, "downloaded_resources": len(content_targets), "resources_downloaded": downloaded_resource_count, "unique_apis_discovered": len(unique_apis), "discovered_apis": unique_apis, "max_resources": max_resources, "max_seconds": max_seconds, "timed_out": timed_out, "cancelled": bool(cancel_event and cancel_event.is_set()), "max_pages": max_pages, "max_depth": max_depth, "warnings": warnings, "coverage_limitations": limitations}
     (output / "extraction.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
     checkpoint.write_text(json.dumps({"queue": list(queue), "seen": sorted(seen)}, indent=2), encoding="utf-8")
     emit("complete")
     return report
 
 
-async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, max_resources: int = 1000, max_seconds: float | None = None, resume: bool = False, incremental: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> Workspace | None:
+async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, max_resources: int = 1000, max_seconds: float | None = None, resume: bool = False, incremental: bool = False, cache_context: str = "anonymous", cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> Workspace | None:
     if not yes:
         raise ValueError("interactive confirmation is required; pass --yes for automation")
     resource_types = parse_resource_selection(resource_types)
@@ -843,7 +844,7 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
         (output / "workspace").mkdir()
         (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
     if url:
-        website_report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, max_resources=max_resources, max_seconds=max_seconds, resume=resume, incremental=incremental, cancel_event=cancel_event, progress=progress, selected_pages=selected_pages)
+        website_report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, max_resources=max_resources, max_seconds=max_seconds, resume=resume, incremental=incremental, cache_context=cache_context, cancel_event=cancel_event, progress=progress, selected_pages=selected_pages)
         raw_api_observations = cast(list[object], website_report.get("api_observations", []))
         website_observations = [
             Observation(
