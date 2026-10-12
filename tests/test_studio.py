@@ -41,6 +41,14 @@ def test_studio_serves_dashboard_and_enforces_confirmation(tmp_path: Path) -> No
     assert "confirmation" in response.json()["detail"]
 
 
+def test_studio_rejects_nonlocal_host_and_origin(tmp_path: Path) -> None:
+    client = TestClient(create_app(tmp_path))
+    assert client.get("/api/health", headers={"host": "example.test"}).status_code == 400
+    assert client.get(
+        "/api/health", headers={"origin": "https://example.test"}
+    ).status_code == 403
+
+
 def test_studio_runs_har_job_and_exposes_inventory(tmp_path: Path) -> None:
     client = TestClient(create_app(tmp_path))
     payload = {

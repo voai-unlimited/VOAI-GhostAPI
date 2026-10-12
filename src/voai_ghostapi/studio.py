@@ -32,7 +32,7 @@ from urllib.parse import urldefrag, urljoin, urlsplit
 
 import httpx
 import uvicorn
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -320,12 +320,28 @@ def create_app(root: Path | None = None) -> FastAPI:
                 process.terminate()
         state.servers.clear()
 
-    app = FastAPI(title="VOAI-GhostAPI Extraction Studio", docs_url="/api/docs", redoc_url=None)
-    app.state.studio = state
+    async def validate_local_request(request: Request) -> None:
+        """Reject non-local Host/Origin values without HTTP middleware."""
+        host = request.headers.get("host", "").split(":", 1)[0].lower().strip("[]")
+        allowed_hosts = {"localhost", "127.0.0.1", "::1", "testserver"}
+        if host not in allowed_hosts:
+            raise HTTPException(status_code=400, detail="Studio accepts localhost requests only")
+        origin = request.headers.get("origin")
+        if origin:
+            parsed = urlsplit(origin)
+            origin_host = (parsed.hostname or "").lower()
+            if parsed.scheme not in {"http", "https"} or origin_host not in allowed_hosts:
+                raise HTTPException(status_code=403, detail="Origin is not allowed")
+            if origin_host != host:
+                raise HTTPException(status_code=403, detail="Origin does not match the Studio host")
 
-    # Security headers are applied per response below; request validation stays
-    # in explicit endpoint validators so TestClient and streaming responses do
-    # not share a blocking middleware lifecycle.
+    app = FastAPI(
+        title="VOAI-GhostAPI Extraction Studio",
+        docs_url="/api/docs",
+        redoc_url=None,
+        dependencies=[Depends(validate_local_request)],
+    )
+    app.state.studio = state
 
     @app.get("/", response_class=HTMLResponse)
     async def index() -> Response:
@@ -692,8 +708,26 @@ def create_app(root: Path | None = None) -> FastAPI:
     @app.get("/api/projects/{project}/runs")
     async def project_runs(project: str) -> list[dict[str, Any]]:
         target = project_dir(project)
-        return [{"run": target.name, "status": _workspace_summary(target).get("status"),
-                 "report": _workspace_summary(target).get("report"), "path": str(target)}]
+        summary = _workspace_summary(target)
+        db = sqlite3.connect(state.db_path)
+        rows = db.execute(
+            "SELECT id,status,stage,created_at,started_at,completed_at,counters_json,checkpoint,result_manifest,error "
+            "FROM jobs WHERE project_id = ? ORDER BY created_at DESC",
+            (state.project_id(ExtractionRequest(mode="har", output=project)),),
+        ).fetchall()
+        db.close()
+        if not rows:
+            return [{"run": target.name, "status": summary.get("status"), "report": summary.get("report"), "path": str(target)}]
+        result: list[dict[str, Any]] = []
+        for row in rows:
+            counters = json.loads(row[6] or "{}")
+            result.append({
+                "run": row[0], "status": row[1], "stage": row[2],
+                "created_at": row[3], "started_at": row[4], "completed_at": row[5],
+                "counters": counters, "checkpoint": row[7], "result_manifest": row[8], "error": row[9],
+                "path": str(target),
+            })
+        return result
 
     @app.post("/api/projects/{project}/rename")
     async def rename_project(project: str, request: ProjectRenameRequest) -> dict[str, Any]:
@@ -742,8 +776,8 @@ def create_app(root: Path | None = None) -> FastAPI:
     async def compare_project_runs(project: str, before: str, after: str) -> dict[str, Any]:
         """Compare two local run directories without claiming absence is deletion."""
         base = project_dir(project)
-        left = state.safe_path(base / before, must_exist=True)
-        right = state.safe_path(base / after, must_exist=True)
+        left = state.safe_path(base / before, must_exist=True) if (base / before).is_dir() else base
+        right = state.safe_path(base / after, must_exist=True) if (base / after).is_dir() else base
         def manifest(root: Path) -> dict[str, str]:
             values: dict[str, str] = {}
             for item in root.rglob("*"):
