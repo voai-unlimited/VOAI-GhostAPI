@@ -15,6 +15,12 @@
 - Added regression fixtures for the extraction modes, resources, interactive
   discovery, security boundaries, cancellation, snapshots, mock generation, and
   CLI compatibility.
+- Added the optional local Extraction Studio (`voai-ghostapi studio`) with
+  Website/HAR/Combined extraction, persistent project and job metadata,
+  guided wizard controls, bounded sitemap discovery and explicit page scope,
+  live event monitoring with cancellation/checkpoint resume, project history,
+  incremental validator-aware resource requests, API and resource explorers,
+  snapshot preview, and a managed localhost FastAPI mock server.
 
 The completed milestone is an offline-first development tool. It is not a full
 browser recording service, a crawler that bypasses access controls, or a claim
@@ -47,3 +53,4 @@ generation.
 - Evaluate a persistent crawl database only if checkpoint files become
   insufficient for the supported workload; retain the current simple format
   for local runs.
+

@@ -454,6 +454,7 @@ async def _get_with_safe_redirects(
     origin: str,
     *,
     rate_limiter: _RateLimiter | None = None,
+    headers: dict[str, str] | None = None,
 ) -> httpx.Response:
     request_url = url
     for _redirect in range(5):
@@ -462,7 +463,7 @@ async def _get_with_safe_redirects(
             try:
                 if rate_limiter is not None:
                     await rate_limiter.wait()
-                candidate = await client.get(request_url)
+                candidate = await client.get(request_url, headers=headers) if headers else await client.get(request_url)
                 response = candidate
                 if candidate.status_code not in {429, 500, 502, 503, 504}:
                     break
@@ -531,7 +532,7 @@ async def _read_sitemap_urls(
     return pages
 
 
-async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, max_resources: int = 1000, max_seconds: float | None = None, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> dict[str, object]:
+async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int = 1, timeout: float = 10.0, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, max_resources: int = 1000, max_seconds: float | None = None, resume: bool = False, incremental: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> dict[str, object]:
     if not 1 <= concurrency <= 32:
         raise ValueError("concurrency must be between 1 and 32")
     if max_resources < 1:
@@ -543,7 +544,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
     origin = urlsplit(start).netloc.lower()
     if resume and output.exists() and not (output / "checkpoint.json").is_file():
         raise ValueError("resume requires an existing extraction checkpoint")
-    _safe_output(output, allow_nonempty=resume)
+    _safe_output(output, allow_nonempty=resume or incremental)
     resources = output / "resources"
     resources.mkdir(exist_ok=True)
     checkpoint = output / "checkpoint.json"
@@ -578,6 +579,14 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
         parts = urlsplit(initial_url)
         base = urlunsplit((parts.scheme, parts.netloc, parts.path or "/", "", ""))
         query_variants.setdefault(base, set()).add(initial_url)
+    previous_records: dict[str, dict[str, object]] = {}
+    previous_manifest = output / "extraction.json"
+    if incremental and previous_manifest.is_file():
+        try:
+            old = json.loads(previous_manifest.read_text(encoding="utf-8"))
+            previous_records = {str(item["url"]): item for item in old.get("resources", []) if item.get("url")}
+        except (OSError, ValueError, TypeError):
+            previous_records = {}
     pages: list[dict[str, object]] = []
     started_at = time.monotonic()
     total_bytes = 0
@@ -668,9 +677,9 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
 
             async def fetch_page(item: tuple[str, int]) -> httpx.Response:
                 async with semaphore:
-                    return await _get_with_safe_redirects(
-                        client, item[0], origin, rate_limiter=rate_limiter
-                    )
+                    old = previous_records.get(item[0], {})
+                    validators = {key: str(old[key]) for key in ("etag", "last_modified") if old.get(key)}
+                    return await _get_with_safe_redirects(client, item[0], origin, rate_limiter=rate_limiter, headers={"If-None-Match": validators["etag"]} if "etag" in validators else {"If-Modified-Since": validators["last_modified"]} if "last_modified" in validators else None)
 
             fetched = await asyncio.gather(
                 *(fetch_page(item) for item in batch), return_exceptions=True
@@ -697,6 +706,10 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                         continue
                     total_bytes += len(content)
                     content_type = response.headers.get("content-type", "")
+                    old = previous_records.get(current, {})
+                    if response.status_code == 304 and old.get("path"):
+                        reused_record = {**old, "extraction_status": "reused-validated", "source_page": current}
+                        resource_records.append(reused_record); pages.append(reused_record); continue
                     digest = hashlib.sha256(content).hexdigest()
                     kind = _resource_kind(content_type, current)
                     selected = "all" in resource_types or kind in selected_types
@@ -719,6 +732,8 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
                         "sha256": digest,
                         "size": len(content),
                         "content_type": content_type,
+                        "etag": response.headers.get("etag"),
+                        "last_modified": response.headers.get("last-modified"),
                         "extraction_status": "skipped by resource limit" if resource_limited else "downloaded" if selected else "skipped by resource selection",
                     }
                     record["resource_type"] = kind
@@ -801,7 +816,7 @@ async def crawl(url: str, output: Path, *, max_pages: int = 20, max_depth: int =
     return report
 
 
-async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, max_resources: int = 1000, max_seconds: float | None = None, resume: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> Workspace | None:
+async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, yes: bool = False, max_pages: int = 20, max_depth: int = 1, concurrency: int = 4, crawl_delay: float | None = None, resource_types: frozenset[str] = frozenset({"html", "css", "js", "images", "json"}), snapshot: bool = False, max_resource_bytes: int = 5 * 1024 * 1024, max_total_bytes: int = 50 * 1024 * 1024, max_resources: int = 1000, max_seconds: float | None = None, resume: bool = False, incremental: bool = False, cancel_event: asyncio.Event | None = None, progress: Callable[[dict[str, Any]], None] | None = None, selected_pages: tuple[str, ...] = ()) -> Workspace | None:
     if not yes:
         raise ValueError("interactive confirmation is required; pass --yes for automation")
     resource_types = parse_resource_selection(resource_types)
@@ -828,7 +843,7 @@ async def extract(url: str, output: Path, har_files: tuple[Path, ...] = (), *, y
         (output / "workspace").mkdir()
         (output / "workspace" / "workspace.json").write_text(workspace.model_dump_json(indent=2), encoding="utf-8")
     if url:
-        website_report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, max_resources=max_resources, max_seconds=max_seconds, resume=resume, cancel_event=cancel_event, progress=progress, selected_pages=selected_pages)
+        website_report = await crawl(url, output / "website", max_pages=max_pages, max_depth=max_depth, concurrency=concurrency, crawl_delay=crawl_delay, resource_types=resource_types, max_resource_bytes=max_resource_bytes, max_total_bytes=max_total_bytes, max_resources=max_resources, max_seconds=max_seconds, resume=resume, incremental=incremental, cancel_event=cancel_event, progress=progress, selected_pages=selected_pages)
         raw_api_observations = cast(list[object], website_report.get("api_observations", []))
         website_observations = [
             Observation(

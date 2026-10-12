@@ -89,6 +89,26 @@ running the CLI.
 
 ## Quick Start
 
+### Extraction Studio
+
+Launch the local graphical interface on `127.0.0.1`:
+
+```powershell
+voai-ghostapi studio --open
+```
+
+The Studio is a thin FastAPI layer over the same Python extraction engine. It
+provides a three-mode confirmation wizard, live job metrics, project/resource
+browsing, API inspection, offline snapshot preview, and an explicitly confirmed
+project-delete action. It does not require
+Node.js at runtime and never binds beyond localhost. The CLI remains fully
+usable without the Studio.
+
+The dashboard accepts HAR files through its local file picker. Website and
+combined jobs still enforce the crawler's URL, size, robots, and output-path
+protections. Interactive discovery is optional and only observes traffic from
+authorized, read-only browser sessions.
+
 ```powershell
 voai-ghostapi import capture.har --output ./workspace
 voai-ghostapi inspect ./workspace

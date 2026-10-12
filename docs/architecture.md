@@ -70,3 +70,13 @@ never bypasses authentication or access controls, never replays mutating
 requests, and never claims complete API discovery. Filesystem writes are kept
 under selected output roots, generated output is not overwritten when non-empty,
 and persisted workspaces contain sanitized values only.
+
+
+The optional `studio` command starts `studio.py`, a localhost-only FastAPI
+application that wraps the same `extract()` function. Its job API tracks real
+progress events, cancellation, and final reports; read-only project endpoints
+serve sanitized inventory and downloaded resource metadata for the dashboard.
+Packaged static assets keep the installed wheel self-contained, so Node.js is
+needed only when changing the UI source. The Studio never exposes arbitrary
+filesystem paths, storage-state files, or a public network binding.
+

@@ -65,3 +65,14 @@ voai-ghostapi preview extracted/snapshot --port 8001
 Use `--dry-run`, `--yes`, or `--root PATH` to control the cleanup operation.
 HAR captures, virtual environments, source code, Git metadata, symlinks, and
 unrelated directories are protected.
+
+The optional local Extraction Studio is launched with:
+
+```text
+voai-ghostapi studio --open
+```
+
+It binds to `127.0.0.1` by default. The Studio uses the same extraction
+pipeline as the CLI, requires explicit confirmation in its wizard, streams
+actual job events, and exposes sanitized project, API, resource, and snapshot
+views. Node.js is not required to run an installed Studio build.

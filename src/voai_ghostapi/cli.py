@@ -21,6 +21,7 @@ from .extract import (
     validate_har_inputs,
 )
 from .interactive import discover_api_requests
+from .studio import run_studio
 
 app = typer.Typer(
     help="Capture behavior. Reconstruct APIs. Develop offline.",
@@ -135,6 +136,21 @@ def preview(
     if not snapshot.is_dir() or not (snapshot / "snapshot.json").is_file():
         raise typer.BadParameter("snapshot must contain snapshot.json")
     subprocess.run([sys.executable, "-m", "http.server", str(port), "--bind", host], cwd=snapshot, check=False)
+
+
+@app.command()
+def studio(
+    port: int = typer.Option(8787, min=1, max=65535, help="Local Studio port."),
+    open_browser: bool = typer.Option(False, "--open", help="Open the Studio in the default browser."),
+    root: Path = typer.Option(Path("."), "--root", file_okay=False),  # noqa: B008
+):
+    """Launch the local Extraction Studio over the existing engine."""
+    if not root.exists() or not root.is_dir():
+        raise typer.BadParameter("Studio root must be an existing directory")
+    try:
+        run_studio(port=port, open_browser=open_browser, root=root)
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
 
 
 @app.command()
